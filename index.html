@@ -1,0 +1,662 @@
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#22c55e">
+<title>SplitGreen — Split the bill, fair & square</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<style> body { margin: 0; } #root { min-height: 100vh; } </style>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect } = React;
+
+const CURRENCIES = ["Rp", "$", "€", "£", "¥", "₹", "฿"];
+const DEFAULT_MODEL = "claude-sonnet-4-6";
+const SCAN_PROMPT = 'Extract the receipt data from this image. Respond with ONLY raw JSON, no markdown, no backticks, no preamble. Use this schema exactly: {"items":[{"name":"string","price":number}],"tax":number,"service":number,"tip":number,"discount":number}. All values are positive numbers. service is the service charge / service fee. discount is the total discount amount. If a value is missing use 0. Only include real line items in items, not the subtotal/total/tax/service lines.';
+
+let idc = 1;
+const uid = () => `id${idc++}_${Math.random().toString(36).slice(2, 6)}`;
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+const b64enc = (str) => { try { return btoa(unescape(encodeURIComponent(str))); } catch (e) { return ""; } };
+const b64dec = (str) => { try { return decodeURIComponent(escape(atob(str))); } catch (e) { return ""; } };
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+
+function App() {
+  const [step, setStep] = useState("start");
+  const [items, setItems] = useState([]);
+  const [people, setPeople] = useState([]);
+  const [tax, setTax] = useState("");
+  const [service, setService] = useState("");
+  const [tip, setTip] = useState("");
+  const [discount, setDiscount] = useState("");
+  const [currency, setCurrency] = useState("Rp");
+  const [paid, setPaid] = useState({});
+
+  const [dark, setDark] = useState(() => {
+    const saved = lsGet("sg_dark", null);
+    if (saved !== null) return saved;
+    try { return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches); } catch (e) { return false; }
+  });
+  useEffect(() => { lsSet("sg_dark", dark); }, [dark]);
+
+  const [history, setHistory] = useState(() => lsGet("sg_history", []));
+  useEffect(() => { lsSet("sg_history", history); }, [history]);
+
+  const [apiKey, setApiKey] = useState(() => lsGet("sg_key", ""));
+  useEffect(() => { lsSet("sg_key", apiKey); }, [apiKey]);
+  const [model, setModel] = useState(() => lsGet("sg_model", DEFAULT_MODEL));
+  useEffect(() => { lsSet("sg_model", model); }, [model]);
+  const [showSettings, setShowSettings] = useState(false);
+
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState("");
+  const [camOpen, setCamOpen] = useState(false);
+  const [camError, setCamError] = useState("");
+
+  const [newPerson, setNewPerson] = useState("");
+  const [readOnly, setReadOnly] = useState(false);
+  const [link, setLink] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const [imgUrl, setImgUrl] = useState("");
+  const [genning, setGenning] = useState(false);
+  const [imgError, setImgError] = useState("");
+
+  const fileRef = useRef(null);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+
+  const money = (n) => {
+    if (currency === "Rp") {
+      const v = Math.round(Number(n) || 0);
+      const s = Math.abs(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+      return `${v < 0 ? "-" : ""}Rp${s}`;
+    }
+    return `${currency}${(Number(n) || 0).toFixed(2)}`;
+  };
+  const num = (v) => Number(v) || 0;
+  const subtotal = items.reduce((s, i) => s + num(i.price), 0);
+  const grandTotal = subtotal + num(tax) + num(service) + num(tip) - num(discount);
+  const totalPaid = people.reduce((s, p) => s + num(paid[p.id]), 0);
+
+  const applyData = (d) => {
+    setPeople(d.people || []);
+    setItems(d.items || []);
+    setTax(d.tax || ""); setService(d.service || ""); setTip(d.tip || ""); setDiscount(d.discount || "");
+    setCurrency(d.currency || "Rp");
+    setPaid(d.paid || {});
+  };
+  useEffect(() => {
+    try {
+      const m = (window.location.hash || "").match(/[#&]s=([^&]+)/);
+      if (m && m[1]) {
+        const json = b64dec(decodeURIComponent(m[1]));
+        if (json) { applyData(JSON.parse(json)); setReadOnly(true); setStep("results"); }
+      }
+    } catch (e) {}
+  }, []);
+
+  // ---------- Receipt scanning (direct browser call with your own key) ----------
+  const scanReceipt = async (b64, mediaType) => {
+    if (!apiKey) { setScanError("Add your Anthropic API key in ⚙️ Settings to enable scanning."); setShowSettings(true); return; }
+    setScanError("");
+    setScanning(true);
+    try {
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: model || DEFAULT_MODEL,
+          max_tokens: 1500,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: mediaType || "image/jpeg", data: b64 } },
+              { type: "text", text: SCAN_PROMPT },
+            ],
+          }],
+        }),
+      });
+      if (!resp.ok) {
+        if (resp.status === 401 || resp.status === 403) throw new Error("auth");
+        if (resp.status === 400 || resp.status === 404) throw new Error("model");
+        throw new Error("api");
+      }
+      const data = await resp.json();
+      const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+      const clean = text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean);
+      const scanned = (parsed.items || []).map((it) => ({ id: uid(), name: it.name || "Item", price: String(num(it.price)), assignedTo: [] }));
+      setItems(scanned.length ? scanned : [{ id: uid(), name: "", price: "", assignedTo: [] }]);
+      setTax(parsed.tax ? String(parsed.tax) : "");
+      setService(parsed.service ? String(parsed.service) : "");
+      setTip(parsed.tip ? String(parsed.tip) : "");
+      setDiscount(parsed.discount ? String(parsed.discount) : "");
+      setPeople([]); setPaid({}); setReadOnly(false); setLink(""); setImgUrl("");
+      try { window.history.replaceState(null, "", window.location.pathname); } catch (e) {}
+      setStep("review");
+    } catch (err) {
+      const msg = err && err.message;
+      if (msg === "auth") setScanError("Your API key was rejected. Double-check it in ⚙️ Settings.");
+      else if (msg === "model") setScanError(`The model "${model}" wasn't accepted. Try a different one in ⚙️ Settings.`);
+      else setScanError("Couldn't read that receipt. Try a sharper photo, check your connection, or enter items manually.");
+    } finally {
+      setScanning(false);
+    }
+  };
+  const onFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      const b64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(String(r.result).split(",")[1]);
+        r.onerror = () => rej(new Error("read"));
+        r.readAsDataURL(file);
+      });
+      await scanReceipt(b64, file.type || "image/jpeg");
+    } catch (err) { setScanError("Couldn't read that image. Try another photo."); }
+    if (fileRef.current) fileRef.current.value = "";
+  };
+  const openCamera = async () => {
+    setCamError(""); setScanError("");
+    if (!apiKey) { setScanError("Add your Anthropic API key in ⚙️ Settings to enable scanning."); setShowSettings(true); return; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { fileRef.current && fileRef.current.click(); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+      streamRef.current = stream;
+      setCamOpen(true);
+    } catch (e) {
+      setCamError("Couldn't open the live camera, opening your photo picker instead.");
+      setTimeout(() => fileRef.current && fileRef.current.click(), 150);
+    }
+  };
+  useEffect(() => {
+    if (camOpen && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch(() => {});
+    }
+  }, [camOpen]);
+  useEffect(() => () => { if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop()); }, []);
+  const closeCamera = () => {
+    if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
+    setCamOpen(false);
+  };
+  const capturePhoto = async () => {
+    const v = videoRef.current;
+    if (!v || !v.videoWidth) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = v.videoWidth; canvas.height = v.videoHeight;
+    canvas.getContext("2d").drawImage(v, 0, 0, canvas.width, canvas.height);
+    const b64 = canvas.toDataURL("image/jpeg", 0.92).split(",")[1];
+    closeCamera();
+    await scanReceipt(b64, "image/jpeg");
+  };
+
+  // ---------- Items / People ----------
+  const addItem = () => setItems((s) => [...s, { id: uid(), name: "", price: "", assignedTo: [] }]);
+  const updItem = (id, f, v) => setItems((s) => s.map((i) => (i.id === id ? { ...i, [f]: v } : i)));
+  const delItem = (id) => setItems((s) => s.filter((i) => i.id !== id));
+  const addPerson = () => { const name = newPerson.trim(); if (!name) return; setPeople((s) => [...s, { id: uid(), name }]); setNewPerson(""); };
+  const delPerson = (id) => {
+    setPeople((s) => s.filter((p) => p.id !== id));
+    setItems((s) => s.map((i) => ({ ...i, assignedTo: i.assignedTo.filter((x) => x !== id) })));
+    setPaid((s) => { const n = { ...s }; delete n[id]; return n; });
+  };
+  const toggleAssign = (itemId, personId) => setItems((s) => s.map((i) => {
+    if (i.id !== itemId) return i;
+    const has = i.assignedTo.includes(personId);
+    return { ...i, assignedTo: has ? i.assignedTo.filter((x) => x !== personId) : [...i.assignedTo, personId] };
+  }));
+  const updPaid = (id, v) => setPaid((s) => ({ ...s, [id]: v }));
+  const markPayer = (id) => setPaid({ [id]: grandTotal.toFixed(2) });
+
+  // ---------- Math ----------
+  const results = () => {
+    const base = {};
+    people.forEach((p) => (base[p.id] = 0));
+    items.forEach((it) => {
+      const price = num(it.price), a = it.assignedTo || [];
+      if (!a.length) return;
+      const share = price / a.length;
+      a.forEach((pid) => { if (base[pid] != null) base[pid] += share; });
+    });
+    const taxN = num(tax), svcN = num(service), tipN = num(tip), discN = num(discount);
+    return people.map((p) => {
+      const itemTotal = base[p.id];
+      const frac = subtotal > 0 ? itemTotal / subtotal : 0;
+      const taxShare = taxN * frac, svcShare = svcN * frac, tipShare = tipN * frac, discShare = discN * frac;
+      return { ...p, itemTotal, taxShare, svcShare, tipShare, discShare, total: itemTotal + taxShare + svcShare + tipShare - discShare };
+    });
+  };
+  const settleUp = () => {
+    const res = results();
+    const bal = res.map((r) => ({ name: r.name, amt: r2(num(paid[r.id]) - r.total) }));
+    const creditors = bal.filter((b) => b.amt > 0.005).map((b) => ({ ...b })).sort((a, b) => b.amt - a.amt);
+    const debtors = bal.filter((b) => b.amt < -0.005).map((b) => ({ name: b.name, amt: -b.amt })).sort((a, b) => b.amt - a.amt);
+    const tx = [];
+    let i = 0, j = 0;
+    while (i < debtors.length && j < creditors.length) {
+      const pay = r2(Math.min(debtors[i].amt, creditors[j].amt));
+      if (pay > 0.005) tx.push({ from: debtors[i].name, to: creditors[j].name, amt: pay });
+      debtors[i].amt = r2(debtors[i].amt - pay); creditors[j].amt = r2(creditors[j].amt - pay);
+      if (debtors[i].amt < 0.005) i++;
+      if (creditors[j].amt < 0.005) j++;
+    }
+    return tx;
+  };
+  const assignedSum = items.reduce((s, i) => s + (i.assignedTo.length ? num(i.price) : 0), 0);
+  const unassigned = subtotal - assignedSum;
+
+  // ---------- Share / Save / Image ----------
+  const buildLink = () => {
+    const payload = { people, items, tax, service, tip, discount, currency, paid };
+    return window.location.origin + window.location.pathname + "#s=" + encodeURIComponent(b64enc(JSON.stringify(payload)));
+  };
+  const makeShare = async () => {
+    const url = buildLink(); setLink(url); setCopied(false);
+    try { await navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch (e) {}
+  };
+  const editCopy = () => { setReadOnly(false); try { window.history.replaceState(null, "", window.location.pathname); } catch (e) {} setStep("review"); };
+  const saveToDevice = () => {
+    const id = uid();
+    const label = `${money(grandTotal)} · ${new Date().toLocaleDateString()}`;
+    const data = { people, items, tax, service, tip, discount, currency, paid };
+    setHistory((h) => [{ id, label, count: people.length, data }, ...h].slice(0, 12));
+    setSaved(true); setTimeout(() => setSaved(false), 1800);
+  };
+  const loadFromDevice = (h) => { applyData(h.data); setReadOnly(false); setStep("results"); };
+  const delFromDevice = (id) => setHistory((h) => h.filter((x) => x.id !== id));
+
+  const buildSvg = () => {
+    const res = results(), tx = settleUp();
+    const W = 600, pad = 30, headerH = 96, rowH = 50;
+    let y = headerH + 40; const parts = [];
+    res.forEach((r) => {
+      parts.push(`<rect x="${pad}" y="${y - 26}" width="${W - 2 * pad}" height="40" rx="12" fill="#f0fdf4"/>`);
+      parts.push(`<text x="${pad + 20}" y="${y}" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#14532d">${esc(r.name)}</text>`);
+      parts.push(`<text x="${W - pad - 20}" y="${y}" font-family="Arial, sans-serif" font-size="20" font-weight="800" fill="#16a34a" text-anchor="end">${esc(money(r.total))}</text>`);
+      y += rowH;
+    });
+    y += 6;
+    parts.push(`<line x1="${pad}" y1="${y - 26}" x2="${W - pad}" y2="${y - 26}" stroke="#bbf7d0" stroke-width="2"/>`);
+    parts.push(`<text x="${pad + 20}" y="${y}" font-family="Arial, sans-serif" font-size="20" font-weight="800" fill="#14532d">Total</text>`);
+    parts.push(`<text x="${W - pad - 20}" y="${y}" font-family="Arial, sans-serif" font-size="20" font-weight="800" fill="#14532d" text-anchor="end">${esc(money(grandTotal))}</text>`);
+    y += rowH;
+    if (tx.length) {
+      parts.push(`<text x="${pad + 20}" y="${y}" font-family="Arial, sans-serif" font-size="18" font-weight="800" fill="#15803d">Settle up</text>`);
+      y += 34;
+      tx.forEach((t) => {
+        parts.push(`<text x="${pad + 20}" y="${y}" font-family="Arial, sans-serif" font-size="17" font-weight="600" fill="#166534">${esc(t.from)}  -&gt;  ${esc(t.to)}</text>`);
+        parts.push(`<text x="${W - pad - 20}" y="${y}" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#16a34a" text-anchor="end">${esc(money(t.amt))}</text>`);
+        y += 30;
+      });
+    }
+    const H = y + 24;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><rect width="${W}" height="${H}" fill="#ffffff"/><rect width="${W}" height="${headerH}" fill="#22c55e"/><text x="${pad}" y="58" font-family="Arial, sans-serif" font-size="30" font-weight="800" fill="#ffffff">SplitGreen</text><text x="${pad}" y="82" font-family="Arial, sans-serif" font-size="15" fill="#dcfce7">Who owes what</text>${parts.join("")}</svg>`;
+    return { svg, W, H };
+  };
+  const makeImage = () => {
+    setGenning(true); setImgError(""); setImgUrl("");
+    const { svg, W, H } = buildSvg();
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = 2, c = document.createElement("canvas");
+        c.width = W * scale; c.height = H * scale;
+        const ctx = c.getContext("2d");
+        ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, c.width, c.height);
+        ctx.scale(scale, scale); ctx.drawImage(img, 0, 0, W, H);
+        setImgUrl(c.toDataURL("image/png"));
+      } catch (e) { setImgError("Couldn't generate the image. Try again."); }
+      finally { setGenning(false); }
+    };
+    img.onerror = () => { setImgError("Couldn't generate the image. Try again."); setGenning(false); };
+    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  };
+
+  const startManual = () => {
+    setItems([{ id: uid(), name: "", price: "", assignedTo: [] }]);
+    setPeople([]); setTax(""); setService(""); setTip(""); setDiscount("");
+    setCurrency("Rp"); setPaid({}); setReadOnly(false); setStep("review");
+  };
+  const reset = () => {
+    setItems([]); setPeople([]); setTax(""); setService(""); setTip(""); setDiscount("");
+    setCurrency("Rp"); setPaid({}); setReadOnly(false); setLink(""); setImgUrl(""); setImgError(""); setScanError("");
+    try { window.history.replaceState(null, "", window.location.pathname); } catch (e) {}
+    setStep("start");
+  };
+  const tipPct = (pct) => setTip((subtotal * pct / 100).toFixed(2));
+
+  const t = {
+    app: dark ? "bg-gray-900 text-gray-100" : "bg-green-50 text-green-900",
+    card: dark ? "bg-gray-800" : "bg-white",
+    soft: dark ? "bg-gray-700" : "bg-green-50",
+    border: dark ? "border-gray-700" : "border-green-200",
+    borderSoft: dark ? "border-gray-700" : "border-green-100",
+    head: dark ? "text-gray-100" : "text-green-900",
+    sub: dark ? "text-gray-400" : "text-green-700",
+    label: dark ? "text-gray-200" : "text-green-800",
+    inputText: dark ? "text-gray-100" : "text-green-900",
+    chip: dark ? "bg-gray-700 text-green-300" : "bg-green-100 text-green-800",
+    chipBtn: dark ? "bg-gray-700 hover:bg-gray-600 text-green-300" : "bg-green-100 hover:bg-green-200 text-green-700",
+    totals: dark ? "bg-gray-800 text-gray-200" : "bg-green-100 text-green-800",
+    secBtn: dark ? "bg-gray-800 hover:bg-gray-700 text-green-300 border-gray-700" : "bg-white hover:bg-green-100 text-green-700 border-green-200",
+    pillOff: dark ? "bg-gray-800 text-green-300 border-gray-600" : "bg-white text-green-700 border-green-200",
+    warn: dark ? "bg-amber-900 text-amber-200" : "bg-amber-50 text-amber-700",
+    err: dark ? "bg-red-900 text-red-200" : "bg-red-50 text-red-600",
+    accent: dark ? "text-green-400" : "text-green-600",
+  };
+
+  const Header = ({ back }) => (
+    <div className="bg-gradient-to-br from-green-400 to-green-600 text-white px-5 pt-6 pb-7 rounded-b-3xl shadow-lg">
+      <div className="flex items-center gap-1">
+        {back && <button onClick={back} className="mr-1 -ml-1 px-2 py-1 rounded-full hover:bg-green-500 active:scale-95 text-xl leading-none">←</button>}
+        <span className="text-2xl">🧾</span>
+        <span className="text-xl font-extrabold tracking-tight">SplitGreen</span>
+        <button onClick={() => setShowSettings(true)} className="ml-auto text-lg p-2 rounded-full hover:bg-green-500 active:scale-95" aria-label="Settings">⚙️</button>
+        <button onClick={() => setDark((d) => !d)} className="text-lg p-2 rounded-full hover:bg-green-500 active:scale-95" aria-label="Toggle dark mode">{dark ? "☀️" : "🌙"}</button>
+      </div>
+    </div>
+  );
+
+  const Field = ({ label, value, set, emoji }) => (
+    <div className={`flex items-center justify-between gap-3 ${t.card} rounded-2xl px-4 py-3 shadow-sm`}>
+      <span className={`text-sm font-semibold ${t.label}`}>{emoji} {label}</span>
+      <div className="flex items-center gap-1">
+        <span className={`${t.accent} font-bold`}>{currency}</span>
+        <input type="number" inputMode="decimal" value={value} onChange={(e) => set(e.target.value)} placeholder="0" className={`w-24 text-right font-bold ${t.inputText} ${t.soft} rounded-lg px-2 py-1 outline-none focus:ring-2 focus:ring-green-300`} />
+      </div>
+    </div>
+  );
+
+  const tx = step === "results" ? settleUp() : [];
+
+  return (
+    <div className={`min-h-screen font-sans ${t.app}`}>
+
+      {showSettings && (
+        <div className="fixed inset-0 z-40 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-3" onClick={() => setShowSettings(false)}>
+          <div className={`${t.card} rounded-3xl shadow-xl p-5 max-w-md w-full`} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-2">
+              <h2 className={`text-lg font-extrabold ${t.head}`}>⚙️ Receipt scanning</h2>
+              <button onClick={() => setShowSettings(false)} className={`${t.sub} text-xl px-2`}>✕</button>
+            </div>
+            <p className={`text-xs ${t.sub} mb-3`}>Paste your own Anthropic API key to turn on receipt scanning. Your key is stored only in this browser and is sent straight to Anthropic to read your receipts — it never goes to any other server.</p>
+            <label className={`text-sm font-semibold ${t.label}`}>Anthropic API key</label>
+            <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-ant-..." className={`w-full mt-1 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
+            <label className={`text-sm font-semibold ${t.label} block mt-3`}>Model</label>
+            <input value={model} onChange={(e) => setModel(e.target.value)} placeholder={DEFAULT_MODEL} className={`w-full mt-1 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => setShowSettings(false)} className="flex-1 bg-green-500 hover:bg-green-600 text-white font-bold py-3 rounded-xl active:scale-95">Done</button>
+              <button onClick={() => { setApiKey(""); }} className={`${t.secBtn} font-bold py-3 px-4 rounded-xl border-2 active:scale-95`}>Clear key</button>
+            </div>
+            <p className={`text-xs ${t.sub} mt-3`}>Don't use this on a shared computer. Get a key at <a href="https://console.anthropic.com/settings/keys" target="_blank" className={`${t.accent} underline`}>console.anthropic.com</a>. Each scan uses a small amount of paid API credit on your account.</p>
+          </div>
+        </div>
+      )}
+
+      {camOpen && (
+        <div className="fixed inset-0 z-50 bg-black flex flex-col">
+          <video ref={videoRef} autoPlay playsInline muted className="flex-1 w-full object-cover"></video>
+          <button onClick={closeCamera} className="absolute top-4 right-4 bg-black bg-opacity-50 text-white rounded-full px-3 py-1 text-xl active:scale-95">✕</button>
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-black bg-opacity-50 text-white text-xs font-semibold px-3 py-1 rounded-full">🧾 Fit the whole receipt in frame</div>
+          <div className="absolute bottom-0 inset-x-0 pb-10 pt-8 flex flex-col items-center bg-gradient-to-t from-black to-transparent">
+            <button onClick={capturePhoto} className="w-20 h-20 rounded-full bg-white border-4 border-green-400 active:scale-95 flex items-center justify-center shadow-lg text-3xl">📷</button>
+          </div>
+        </div>
+      )}
+
+      <div className="max-w-md mx-auto pb-24">
+
+        {step === "start" && (
+          <React.Fragment>
+            <Header />
+            <div className="px-5 -mt-3">
+              <div className={`${t.card} rounded-3xl shadow-md p-6 text-center`}>
+                <div className="text-4xl">🧾💸</div>
+                <h1 className={`text-2xl font-extrabold mt-3 ${t.head}`}>Split the bill, fair &amp; square</h1>
+                <p className={`${t.sub} text-sm mt-2`}>Scan or type the bill, split it fairly, share a link.</p>
+              </div>
+
+              <input ref={fileRef} type="file" accept="image/*" onChange={onFile} className="hidden" />
+              {apiKey ? (
+                <React.Fragment>
+                  <button onClick={openCamera} disabled={scanning} className="w-full mt-5 bg-green-500 hover:bg-green-600 text-white font-bold py-4 rounded-2xl shadow-md active:scale-[0.98] disabled:opacity-70">{scanning ? "Reading receipt…" : "📷 Scan with camera"}</button>
+                  <button onClick={() => fileRef.current && fileRef.current.click()} disabled={scanning} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98] disabled:opacity-70`}>🖼️ Upload a photo</button>
+                  <button onClick={startManual} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98]`}>✏️ Enter manually</button>
+                </React.Fragment>
+              ) : (
+                <React.Fragment>
+                  <button onClick={startManual} className="w-full mt-5 bg-green-500 hover:bg-green-600 text-white font-bold py-4 rounded-2xl shadow-md active:scale-[0.98]">✏️ Start a new split</button>
+                  <button onClick={() => setShowSettings(true)} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98]`}>📷 Turn on receipt scanning</button>
+                </React.Fragment>
+              )}
+
+              {scanError && <p className={`${t.err} text-sm mt-3 rounded-xl p-3`}>{scanError}</p>}
+              {camError && <p className={`${t.warn} text-sm mt-3 rounded-xl p-3`}>{camError}</p>}
+
+              {history.length > 0 && (
+                <div className={`mt-6 ${t.card} rounded-2xl shadow-sm p-4`}>
+                  <p className={`text-sm font-semibold ${t.label} mb-2`}>💾 Saved on this device</p>
+                  <div className="space-y-2">
+                    {history.map((h) => (
+                      <div key={h.id} className={`flex items-center gap-2 ${t.soft} rounded-xl p-3`}>
+                        <button onClick={() => loadFromDevice(h)} className="flex-1 text-left">
+                          <div className={`font-bold ${t.head}`}>{h.label}</div>
+                          <div className={`text-xs ${t.sub}`}>{h.count} {h.count === 1 ? "person" : "people"}</div>
+                        </button>
+                        <button onClick={() => delFromDevice(h.id)} className="text-green-400 hover:text-red-500 px-2 active:scale-90">🗑️</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <p className={`text-xs ${t.sub} text-center mt-6`}>Tip: open a SplitGreen link from a friend and it loads their split here automatically.</p>
+            </div>
+          </React.Fragment>
+        )}
+
+        {step === "review" && (
+          <React.Fragment>
+            <Header back={() => setStep("start")} />
+            <div className="px-5 -mt-3">
+              <div className={`${t.card} rounded-3xl shadow-md p-5`}>
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className={`text-lg font-extrabold ${t.head}`}>🛒 Items</h2>
+                  <select value={currency} onChange={(e) => setCurrency(e.target.value)} className={`${t.soft} ${t.accent} rounded-lg px-2 py-1 font-bold outline-none`}>
+                    {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  {items.map((it) => (
+                    <div key={it.id} className="flex items-center gap-2">
+                      <input value={it.name} onChange={(e) => updItem(it.id, "name", e.target.value)} placeholder="Item name" className={`flex-1 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
+                      <div className={`flex items-center ${t.soft} rounded-xl px-2`}>
+                        <span className={`${t.accent} font-bold text-sm`}>{currency}</span>
+                        <input type="number" inputMode="decimal" value={it.price} onChange={(e) => updItem(it.id, "price", e.target.value)} placeholder="0" className={`w-20 text-right font-bold py-2 bg-transparent outline-none ${t.inputText}`} />
+                      </div>
+                      <button onClick={() => delItem(it.id)} className="text-green-400 hover:text-red-500 px-1 active:scale-90">🗑️</button>
+                    </div>
+                  ))}
+                </div>
+                <button onClick={addItem} className={`mt-3 ${t.accent} font-bold`}>+ Add item</button>
+              </div>
+
+              <div className="mt-4 space-y-2">
+                <Field label="Tax" value={tax} set={setTax} emoji="🏛️" />
+                <Field label="Service" value={service} set={setService} emoji="🛎️" />
+                <Field label="Discount" value={discount} set={setDiscount} emoji="🎉" />
+                <div className={`${t.card} rounded-2xl px-4 py-3 shadow-sm`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className={`text-sm font-semibold ${t.label}`}>💚 Tip</span>
+                    <div className="flex items-center gap-1">
+                      <span className={`${t.accent} font-bold`}>{currency}</span>
+                      <input type="number" inputMode="decimal" value={tip} onChange={(e) => setTip(e.target.value)} placeholder="0" className={`w-24 text-right font-bold ${t.inputText} ${t.soft} rounded-lg px-2 py-1 outline-none focus:ring-2 focus:ring-green-300`} />
+                    </div>
+                  </div>
+                  <div className="flex gap-2 mt-2">
+                    {[15, 18, 20, 25].map((p) => <button key={p} onClick={() => tipPct(p)} className={`flex-1 text-xs font-bold ${t.chipBtn} rounded-lg py-1 active:scale-95`}>{p}%</button>)}
+                  </div>
+                </div>
+              </div>
+
+              <div className={`mt-4 ${t.totals} rounded-2xl p-4 text-sm font-semibold`}>
+                <div className="flex justify-between"><span>Subtotal</span><span>{money(subtotal)}</span></div>
+                {num(tax) > 0 && <div className="flex justify-between mt-1"><span>Tax</span><span>{money(num(tax))}</span></div>}
+                {num(service) > 0 && <div className="flex justify-between mt-1"><span>Service</span><span>{money(num(service))}</span></div>}
+                {num(discount) > 0 && <div className="flex justify-between mt-1"><span>Discount</span><span>−{money(num(discount))}</span></div>}
+                {num(tip) > 0 && <div className="flex justify-between mt-1"><span>Tip</span><span>{money(num(tip))}</span></div>}
+                <div className={`flex justify-between mt-1 font-extrabold text-base border-t ${t.border} pt-1`}><span>Grand total</span><span>{money(grandTotal)}</span></div>
+              </div>
+
+              <button onClick={() => setStep("people")} className="w-full mt-5 bg-green-500 hover:bg-green-600 text-white font-bold py-4 rounded-2xl shadow-md active:scale-[0.98]">👥 Who's splitting?</button>
+            </div>
+          </React.Fragment>
+        )}
+
+        {step === "people" && (
+          <React.Fragment>
+            <Header back={() => setStep("review")} />
+            <div className="px-5 -mt-3">
+              <div className={`${t.card} rounded-3xl shadow-md p-5`}>
+                <h2 className={`text-lg font-extrabold mb-3 ${t.head}`}>👥 Add people</h2>
+                <div className="flex gap-2">
+                  <input value={newPerson} onChange={(e) => setNewPerson(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addPerson()} placeholder="Name" className={`flex-1 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
+                  <button onClick={addPerson} className="bg-green-500 hover:bg-green-600 text-white font-bold px-4 rounded-xl active:scale-95 text-xl">+</button>
+                </div>
+                <div className="flex flex-wrap gap-2 mt-4">
+                  {people.map((p) => <span key={p.id} className={`flex items-center gap-1 ${t.chip} font-semibold rounded-full pl-3 pr-2 py-1`}>{p.name}<button onClick={() => delPerson(p.id)} className="hover:text-red-500 px-1">✕</button></span>)}
+                  {!people.length && <p className={`${t.sub} text-sm`}>Add at least one person 🙂</p>}
+                </div>
+              </div>
+              <button onClick={() => setStep("assign")} disabled={!people.length} className="w-full mt-5 bg-green-500 hover:bg-green-600 text-white font-bold py-4 rounded-2xl shadow-md active:scale-[0.98] disabled:opacity-50">Assign items →</button>
+            </div>
+          </React.Fragment>
+        )}
+
+        {step === "assign" && (
+          <React.Fragment>
+            <Header back={() => setStep("people")} />
+            <div className="px-5 -mt-3">
+              <p className={`text-sm ${t.sub} mb-3 text-center`}>Tap names to assign each item. Tap several to split it. 🍽️</p>
+              <div className="space-y-3">
+                {items.map((it) => (
+                  <div key={it.id} className={`${t.card} rounded-2xl shadow-sm p-4`}>
+                    <div className={`flex justify-between font-bold ${t.head}`}><span>{it.name || "Item"}</span><span>{money(it.price)}</span></div>
+                    <div className="flex flex-wrap gap-2 mt-3">
+                      {people.map((p) => { const on = it.assignedTo.includes(p.id); return <button key={p.id} onClick={() => toggleAssign(it.id, p.id)} className={`text-sm font-semibold rounded-full px-3 py-1 active:scale-95 border-2 ${on ? "bg-green-500 text-white border-green-500" : t.pillOff}`}>{on && "✓ "}{p.name}</button>; })}
+                    </div>
+                    {it.assignedTo.length > 1 && <p className={`text-xs ${t.accent} mt-2`}>Split {it.assignedTo.length} ways → {money(num(it.price) / it.assignedTo.length)} each</p>}
+                  </div>
+                ))}
+              </div>
+              {unassigned > 0.005 && <p className={`${t.warn} text-sm rounded-xl p-3 mt-4`}>⚠️ {money(unassigned)} of items aren't assigned to anyone yet.</p>}
+              <button onClick={() => { setImgUrl(""); setLink(""); setStep("results"); }} className="w-full mt-5 bg-green-500 hover:bg-green-600 text-white font-bold py-4 rounded-2xl shadow-md active:scale-[0.98]">See the split 🎉</button>
+            </div>
+          </React.Fragment>
+        )}
+
+        {step === "results" && (
+          <React.Fragment>
+            <Header back={readOnly ? null : () => setStep("assign")} />
+            <div className="px-5 -mt-3">
+              {readOnly && <div className={`${t.chip} text-sm font-semibold rounded-2xl p-3 mb-4 text-center`}>👀 Shared split (view only)</div>}
+
+              <div className={`${t.card} rounded-3xl shadow-md p-5`}>
+                <h2 className={`text-lg font-extrabold mb-3 ${t.head}`}>💰 Who owes what</h2>
+                <div className="space-y-3">
+                  {results().map((r) => (
+                    <div key={r.id} className={`${t.soft} rounded-2xl p-4`}>
+                      <div className="flex justify-between items-baseline">
+                        <span className={`font-extrabold text-lg ${t.head}`}>{r.name}</span>
+                        <span className={`font-extrabold text-lg ${t.accent}`}>{money(r.total)}</span>
+                      </div>
+                      <div className={`text-xs ${t.sub} mt-1 space-y-0.5`}>
+                        <div className="flex justify-between"><span>Items</span><span>{money(r.itemTotal)}</span></div>
+                        {num(tax) > 0 && <div className="flex justify-between"><span>Tax share</span><span>{money(r.taxShare)}</span></div>}
+                        {num(service) > 0 && <div className="flex justify-between"><span>Service share</span><span>{money(r.svcShare)}</span></div>}
+                        {num(discount) > 0 && <div className="flex justify-between"><span>Discount</span><span>−{money(r.discShare)}</span></div>}
+                        {num(tip) > 0 && <div className="flex justify-between"><span>Tip share</span><span>{money(r.tipShare)}</span></div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className={`flex justify-between font-extrabold mt-4 pt-3 border-t ${t.border} ${t.head}`}><span>Total</span><span>{money(grandTotal)}</span></div>
+              </div>
+
+              <div className={`${t.card} rounded-3xl shadow-md p-5 mt-4`}>
+                <h2 className={`text-lg font-extrabold mb-1 ${t.head}`}>🤝 Settle up</h2>
+                {!readOnly && (
+                  <React.Fragment>
+                    <p className={`text-xs ${t.sub} mb-3`}>Enter how much each person already paid (e.g. whoever covered the bill).</p>
+                    <div className="space-y-2">
+                      {people.map((p) => (
+                        <div key={p.id} className="flex items-center gap-2">
+                          <span className={`flex-1 font-semibold text-sm ${t.head}`}>{p.name}</span>
+                          <button onClick={() => markPayer(p.id)} className={`text-xs font-bold ${t.chipBtn} rounded-lg px-2 py-1 active:scale-95`}>Paid it all</button>
+                          <div className={`flex items-center ${t.soft} rounded-xl px-2`}>
+                            <span className={`${t.accent} font-bold text-sm`}>{currency}</span>
+                            <input type="number" inputMode="decimal" value={paid[p.id] || ""} onChange={(e) => updPaid(p.id, e.target.value)} placeholder="0" className={`w-20 text-right font-bold py-2 bg-transparent outline-none ${t.inputText}`} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {totalPaid > 0 && Math.abs(totalPaid - grandTotal) > 0.01 && <p className={`${t.warn} text-xs rounded-xl p-2 mt-2`}>Paid so far: {money(totalPaid)} of {money(grandTotal)}.</p>}
+                  </React.Fragment>
+                )}
+                <div className="mt-3 space-y-2">
+                  {tx.length ? tx.map((tr, i) => (
+                    <div key={i} className={`flex items-center justify-between ${t.soft} rounded-xl p-3`}>
+                      <span className={`text-sm ${t.head}`}><span className="font-bold">{tr.from}</span> pays <span className="font-bold">{tr.to}</span></span>
+                      <span className={`font-extrabold ${t.accent}`}>{money(tr.amt)}</span>
+                    </div>
+                  )) : <p className={`${t.sub} text-sm`}>{readOnly ? "Nothing to settle 🎉" : "Add who paid above to see who owes whom."}</p>}
+                </div>
+              </div>
+
+              {!readOnly && (
+                <React.Fragment>
+                  <button onClick={makeShare} className="w-full mt-4 bg-green-500 hover:bg-green-600 text-white font-bold py-4 rounded-2xl shadow-md active:scale-[0.98]">🔗 {copied ? "Link copied!" : "Share via link"}</button>
+                  {link && (
+                    <div className={`mt-2 ${t.card} rounded-2xl shadow-sm p-3`}>
+                      <p className={`text-xs ${t.sub} break-all`}>{link}</p>
+                      <p className={`text-xs ${t.sub} mt-2`}>Anyone who opens this link sees this exact split. The data lives in the link itself — no account or server needed.</p>
+                    </div>
+                  )}
+                  <button onClick={saveToDevice} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98]`}>💾 {saved ? "Saved to device!" : "Save to this device"}</button>
+                </React.Fragment>
+              )}
+
+              <button onClick={makeImage} disabled={genning} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98] disabled:opacity-70`}>{genning ? "Generating…" : "⬇️ Download as image"}</button>
+              {imgError && <p className={`${t.accent} text-sm mt-2 text-center`}>{imgError}</p>}
+              {imgUrl && (
+                <div className={`mt-3 ${t.card} rounded-2xl shadow-sm p-4 text-center`}>
+                  <img src={imgUrl} alt="Split summary" className={`w-full rounded-xl border ${t.borderSoft}`} />
+                  <a href={imgUrl} download="splitgreen.png" className="inline-block mt-3 bg-green-500 hover:bg-green-600 text-white font-bold px-4 py-2 rounded-xl active:scale-95">⬇️ Save image</a>
+                  <p className={`text-xs ${t.sub} mt-2`}>On mobile, long-press the image to save it to your photos.</p>
+                </div>
+              )}
+
+              {readOnly && <button onClick={editCopy} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98]`}>✏️ Edit a copy</button>}
+              <button onClick={reset} className={`w-full mt-4 ${t.accent} font-bold py-3`}>↺ Start a new split</button>
+            </div>
+          </React.Fragment>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
