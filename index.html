@@ -584,13 +584,15 @@ function App() {
                 </div>
                 <div className="space-y-2">
                   {items.map((it) => (
-                    <div key={it.id} className="flex items-center gap-2">
-                      <input value={it.name} onChange={(e) => updItem(it.id, "name", e.target.value)} placeholder="Item name" className={`flex-1 min-w-0 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
-                      <div className={`flex items-center ${t.soft} rounded-xl px-2 shrink-0`}>
-                        <span className={`${t.accent} font-bold text-xs`}>{currency}</span>
-                        <input type="number" inputMode="decimal" value={it.price} onChange={(e) => updItem(it.id, "price", e.target.value)} placeholder="0" className={`w-16 text-right font-bold py-2 bg-transparent outline-none ${t.inputText}`} />
+                    <div key={it.id} className={`border ${t.border} rounded-2xl p-3 space-y-2`}>
+                      <input value={it.name} onChange={(e) => updItem(it.id, "name", e.target.value)} placeholder="Item name" className={`w-full min-w-0 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
+                      <div className="flex items-center gap-2">
+                        <div className={`flex items-center ${t.soft} rounded-xl px-2`}>
+                          <span className={`${t.accent} font-bold text-xs`}>{currency}</span>
+                          <input type="number" inputMode="decimal" value={it.price} onChange={(e) => updItem(it.id, "price", e.target.value)} placeholder="0" className={`w-24 text-right font-bold py-2 bg-transparent outline-none ${t.inputText}`} />
+                        </div>
+                        <button onClick={() => delItem(it.id)} className="text-green-400 hover:text-red-500 active:scale-90 text-lg ml-auto">🗑️</button>
                       </div>
-                      <button onClick={() => delItem(it.id)} className="text-green-400 hover:text-red-500 active:scale-90 shrink-0 text-lg">🗑️</button>
                     </div>
                   ))}
                 </div>
