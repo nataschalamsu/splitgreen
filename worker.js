@@ -1,7 +1,20 @@
 // worker.js — runs on Cloudflare. Handles /api/scan with Gemini (key hidden),
 // and serves index.html (and everything else) as static files.
 
-const GEMINI_PROMPT = 'You are reading a receipt photo. Return ONLY JSON (no markdown) matching exactly: {"items":[{"name":string,"price":number}],"tax":number,"service":number,"tip":number,"discount":number}. Numbers are in the receipt currency with no symbols or thousands separators (e.g. 25000, not "Rp25.000"). service = service charge/fee. discount = total discount amount. Use 0 when a value is absent. Include every ordered line item; do NOT include subtotal, total, tax, or service rows as items.';
+const GEMINI_PROMPT = `You are extracting the line items from a receipt photo, often an Indonesian restaurant or cafe receipt (thermal printed, sometimes slightly crumpled or angled). Return ONLY JSON, no markdown and no backticks, in exactly this shape:
+{"items":[{"name":string,"price":number}],"tax":number,"service":number,"tip":number,"discount":number}
+
+Rules:
+- Each item's "price" MUST be the LINE TOTAL for that row (quantity times unit price) — the rightmost amount printed on that item's line. Do NOT use the per-unit price shown after an "@" symbol.
+- If an item's quantity is greater than 1, include it in the name, for example "Soto Ayam (4x)".
+- Drop free modifier or note lines that cost 0 (for example "Less Sugar @0"). Do not list them as items.
+- All numbers must be plain values in the receipt's currency with NO currency symbols and NO thousands separators. Indonesian receipts use "." as a thousands separator, so "88.000" means 88000 and "9.000" means 9000.
+- tax: the tax line. It may be labelled PB1, PB 1, PPN, Pajak, Tax, or VAT.
+- service: a service charge or fee. It may be labelled Service, Service Charge, Svc, or Layanan.
+- discount: the total discount as a positive number. It may be labelled Discount, Disc, Diskon, or Potongan.
+- tip: gratuity, if any.
+- Use 0 for any of tax, service, tip, or discount that is not present.
+- NEVER list these as items: subtotal, total, grand total, the item-count line (like "4 item" or "14 items"), payment lines (QRIS, BCA, cash, change, card), the date, cashier, server, table, info, or any transaction or order ID.`;
 
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
@@ -49,7 +62,6 @@ export default {
       if (request.method === "GET") return json({ ok: true, configured: !!env.GEMINI_API_KEY });
       return json({ error: "method_not_allowed" }, 405);
     }
-    // Everything else → serve the static files (index.html, etc.)
     return env.ASSETS.fetch(request);
   },
 };

@@ -169,7 +169,7 @@ function App() {
   const [serverScan, setServerScan] = useState(false);
   useEffect(() => {
     let live = true;
-    fetch("/api/scan").then((r) => (r.ok ? r.json() : null)).then((d) => { if (live && d && d.ok) setServerScan(true); }).catch(() => {});
+    fetch("/api/scan").then((r) => (r.ok ? r.json() : null)).then((d) => { if (live && d && d.ok && d.configured) setServerScan(true); }).catch(() => {});
     return () => { live = false; };
   }, []);
 
@@ -177,6 +177,7 @@ function App() {
   const [scanStatus, setScanStatus] = useState("");
   const [scanProgress, setScanProgress] = useState(0);
   const [scanError, setScanError] = useState("");
+  const [scanNotice, setScanNotice] = useState("");
   const [camOpen, setCamOpen] = useState(false);
   const [camError, setCamError] = useState("");
 
@@ -250,11 +251,12 @@ function App() {
     const err = new Error("server"); err.code = resp.status === 429 ? "rate" : "api"; throw err;
   };
   const runOCR = async (image) => {
-    setScanError(""); setScanProgress(0); setScanStatus(serverScan ? "Reading with Gemini…" : "Enhancing photo…"); setScanning(true);
+    setScanError(""); setScanNotice(""); setScanProgress(0); setScanStatus(serverScan ? "Reading with Gemini…" : "Enhancing photo…"); setScanning(true);
     let worker;
     try {
       let parsed = await tryServerScan(image);
       if (!parsed) {
+        if (serverScan) setScanNotice("Cloud scanner was unreachable — read this on your device instead. Item names may be rough, so please double-check them.");
         if (!window.Tesseract) { setScanError("The on-device reader is still loading — try again in a moment."); return; }
         setScanStatus("Enhancing photo…");
         const processed = await preprocess(image);
@@ -525,6 +527,7 @@ function App() {
               <button onClick={startManual} disabled={scanning} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98] disabled:opacity-70`}>✏️ Enter manually</button>
 
               {scanError && <p className={`${t.err} text-sm mt-3 rounded-xl p-3`}>{scanError}</p>}
+              {scanNotice && <p className={`${t.warn} text-sm mt-3 rounded-xl p-3`}>{scanNotice}</p>}
               {camError && <p className={`${t.warn} text-sm mt-3 rounded-xl p-3`}>{camError}</p>}
               <p className={`text-xs ${t.sub} text-center mt-3`}>{serverScan ? "✨ Scanning powered by Gemini — no setup needed." : "On-device scanning. Add a clear, flat, well-lit photo for best results."}</p>
 
