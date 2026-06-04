@@ -55,6 +55,42 @@ async function handleScan(request, env) {
   }
 }
 
+// ---- Short share links (Cloudflare KV) ----
+const CODE_CHARS = "ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"; // no look-alikes (0/O/1/l)
+function makeCode(n = 7) {
+  const a = new Uint8Array(n);
+  crypto.getRandomValues(a);
+  let s = "";
+  for (let i = 0; i < n; i++) s += CODE_CHARS[a[i] % CODE_CHARS.length];
+  return s;
+}
+
+async function handleShare(request, env) {
+  if (!env.SPLITS) return json({ error: "not_configured" }, 500);
+
+  if (request.method === "POST") {
+    let body;
+    try { body = await request.json(); } catch (e) { return json({ error: "bad_request" }, 400); }
+    const data = body && body.data;
+    if (typeof data !== "string" || !data) return json({ error: "no_data" }, 400);
+    if (data.length > 200000) return json({ error: "too_large" }, 413);
+    let code = makeCode();
+    for (let i = 0; i < 5 && (await env.SPLITS.get(code)) !== null; i++) code = makeCode();
+    await env.SPLITS.put(code, data);
+    return json({ id: code });
+  }
+
+  if (request.method === "GET") {
+    const id = new URL(request.url).searchParams.get("id") || "";
+    if (!/^[A-Za-z0-9]{1,32}$/.test(id)) return json({ error: "bad_id" }, 400);
+    const data = await env.SPLITS.get(id);
+    if (data === null) return json({ error: "not_found" }, 404);
+    return json({ data });
+  }
+
+  return json({ error: "method_not_allowed" }, 405);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -63,6 +99,7 @@ export default {
       if (request.method === "GET") return json({ ok: true, configured: !!env.GEMINI_API_KEY });
       return json({ error: "method_not_allowed" }, 405);
     }
+    if (url.pathname === "/api/share") return handleShare(request, env);
     return env.ASSETS.fetch(request);
   },
 };

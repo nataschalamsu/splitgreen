@@ -188,7 +188,10 @@ function App() {
   const [readOnly, setReadOnly] = useState(false);
   const [link, setLink] = useState("");
   const [copied, setCopied] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [loadingShare, setLoadingShare] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
   const [imgUrl, setImgUrl] = useState("");
   const [genning, setGenning] = useState(false);
@@ -219,15 +222,31 @@ function App() {
     setPaid(d.paid || {});
   };
   useEffect(() => {
-    try {
-      const q = (window.location.search || "").match(/[?&]s=([^&]+)/);
-      const h = (window.location.hash || "").match(/[#&]s=([^&]+)/);
-      const enc = (q && q[1]) || (h && h[1]);
-      if (enc) {
-        const json = b64dec(decodeURIComponent(enc));
-        if (json) { applyData(JSON.parse(json)); setReadOnly(true); setStep("results"); }
-      }
-    } catch (e) {}
+    let live = true;
+    (async () => {
+      try {
+        const q = (window.location.search || "").match(/[?&]s=([^&]+)/);
+        const h = (window.location.hash || "").match(/[#&]s=([^&]+)/);
+        const raw = (q && q[1]) || (h && h[1]);
+        if (!raw) return;
+        // Short server code (e.g. ?s=a8Kf2): fetch the stored split.
+        if (q && q[1] && /^[A-Za-z0-9]{1,16}$/.test(q[1])) {
+          setLoadingShare(true);
+          try {
+            const r = await fetch("/api/share?id=" + encodeURIComponent(q[1]));
+            const d = r.ok ? await r.json() : null;
+            if (live && d && d.data) { applyData(JSON.parse(d.data)); setReadOnly(true); setStep("results"); }
+            else if (live) setLoadError(true);
+          } catch (e) { if (live) setLoadError(true); }
+          if (live) setLoadingShare(false);
+          return;
+        }
+        // Self-contained link (legacy / offline fallback): decode the payload inline.
+        const json = b64dec(decodeURIComponent(raw));
+        if (json && live) { applyData(JSON.parse(json)); setReadOnly(true); setStep("results"); }
+      } catch (e) { if (live) { setLoadError(true); setLoadingShare(false); } }
+    })();
+    return () => { live = false; };
   }, []);
 
   // ---------- Scanning ----------
@@ -381,12 +400,19 @@ function App() {
   const unassigned = subtotal - assignedSum;
 
   // ---------- Share / Save / Image ----------
-  const buildLink = () => {
-    const payload = { people, items, tax, service, tip, discount, currency, paid };
-    return window.location.origin + window.location.pathname + "?s=" + encodeURIComponent(b64enc(JSON.stringify(payload)));
-  };
+  const base = () => window.location.origin + window.location.pathname;
+  const selfLink = (payload) => base() + "?s=" + encodeURIComponent(b64enc(JSON.stringify(payload)));
   const makeShare = async () => {
-    const url = buildLink(); setLink(url); setCopied(false);
+    if (sharing) return;
+    setSharing(true); setCopied(false);
+    const payload = { people, items, tax, service, tip, discount, currency, paid };
+    let url = "";
+    try {
+      const r = await fetch("/api/share", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ data: JSON.stringify(payload) }) });
+      if (r.ok) { const d = await r.json(); if (d && d.id) url = base() + "?s=" + d.id; }
+    } catch (e) {}
+    if (!url) url = selfLink(payload); // fallback: self-contained link (server unavailable)
+    setLink(url); setSharing(false);
     try { await navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch (e) {}
   };
   const editCopy = () => { setReadOnly(false); try { window.history.replaceState(null, "", window.location.pathname); } catch (e) {} setStep("review"); };
@@ -532,12 +558,22 @@ function App() {
         </div>
       )}
 
+      {loadingShare && (
+        <div className="fixed inset-0 z-50 bg-black bg-opacity-60 flex items-center justify-center">
+          <div className={`${t.card} rounded-2xl shadow-lg px-6 py-5 text-center`}>
+            <div className="text-3xl animate-pulse">🧾</div>
+            <p className={`mt-2 font-bold ${t.head}`}>Loading split…</p>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-md mx-auto">
 
         {step === "start" && (
           <React.Fragment>
             <Header />
             <div className="px-4 -mt-3 pb-24">
+              {loadError && <div className={`${t.warn} text-sm rounded-2xl p-3 mb-4 text-center`}>This share link couldn't be opened — it may have expired or be incomplete. Ask for a fresh link.</div>}
               <div className={`${t.card} rounded-3xl shadow-md p-6 text-center`}>
                 <div className="text-4xl">🧾💸</div>
                 <h1 className={`text-2xl font-extrabold mt-3 ${t.head}`}>Split the bill, fair &amp; square</h1>
@@ -746,11 +782,11 @@ function App() {
 
               {!readOnly && (
                 <React.Fragment>
-                  <button onClick={makeShare} className="w-full mt-4 bg-green-500 hover:bg-green-600 text-white font-bold py-4 rounded-2xl shadow-md active:scale-[0.98]">🔗 {copied ? "Link copied!" : "Share via link"}</button>
+                  <button onClick={makeShare} disabled={sharing} className="w-full mt-4 bg-green-500 hover:bg-green-600 text-white font-bold py-4 rounded-2xl shadow-md active:scale-[0.98] disabled:opacity-70">🔗 {sharing ? "Creating link…" : copied ? "Link copied!" : "Share via link"}</button>
                   {link && (
                     <div className={`mt-2 ${t.card} rounded-2xl shadow-sm p-3`}>
                       <p className={`text-xs ${t.sub} break-all`}>{link}</p>
-                      <p className={`text-xs ${t.sub} mt-2`}>Anyone who opens this link sees this exact split. The data lives in the link itself — no account or server needed.</p>
+                      <p className={`text-xs ${t.sub} mt-2`}>Anyone who opens this link sees this exact split.</p>
                     </div>
                   )}
                   <button onClick={saveToDevice} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98]`}>💾 {saved ? "Saved to device!" : "Save to this device"}</button>
