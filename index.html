@@ -220,9 +220,11 @@ function App() {
   };
   useEffect(() => {
     try {
-      const m = (window.location.hash || "").match(/[#&]s=([^&]+)/);
-      if (m && m[1]) {
-        const json = b64dec(decodeURIComponent(m[1]));
+      const q = (window.location.search || "").match(/[?&]s=([^&]+)/);
+      const h = (window.location.hash || "").match(/[#&]s=([^&]+)/);
+      const enc = (q && q[1]) || (h && h[1]);
+      if (enc) {
+        const json = b64dec(decodeURIComponent(enc));
         if (json) { applyData(JSON.parse(json)); setReadOnly(true); setStep("results"); }
       }
     } catch (e) {}
@@ -381,7 +383,7 @@ function App() {
   // ---------- Share / Save / Image ----------
   const buildLink = () => {
     const payload = { people, items, tax, service, tip, discount, currency, paid };
-    return window.location.origin + window.location.pathname + "#s=" + encodeURIComponent(b64enc(JSON.stringify(payload)));
+    return window.location.origin + window.location.pathname + "?s=" + encodeURIComponent(b64enc(JSON.stringify(payload)));
   };
   const makeShare = async () => {
     const url = buildLink(); setLink(url); setCopied(false);
