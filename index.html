@@ -400,10 +400,25 @@ function App() {
     const W = 600, pad = 30, headerH = 96, rowH = 50;
     let y = headerH + 40; const parts = [];
     res.forEach((r) => {
-      parts.push(`<rect x="${pad}" y="${y - 26}" width="${W - 2 * pad}" height="40" rx="12" fill="#f0fdf4"/>`);
+      const lis = (r.lineItems && r.lineItems.length)
+        ? r.lineItems.map((li) => ({ label: li.name + (li.ways > 1 ? ` (split ${li.ways})` : ""), amt: li.share }))
+        : [{ label: "No items assigned", amt: 0 }];
+      const rows = lis.slice();
+      if (num(tax) > 0) rows.push({ label: "Tax share", amt: r.taxShare });
+      if (num(service) > 0) rows.push({ label: "Service share", amt: r.svcShare });
+      if (num(discount) > 0) rows.push({ label: "Discount", amt: -r.discShare });
+      if (num(tip) > 0) rows.push({ label: "Tip share", amt: r.tipShare });
+      const blockH = 46 + rows.length * 24;
+      parts.push(`<rect x="${pad}" y="${y - 26}" width="${W - 2 * pad}" height="${blockH}" rx="14" fill="#f0fdf4"/>`);
       parts.push(`<text x="${pad + 20}" y="${y}" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#14532d">${esc(r.name)}</text>`);
       parts.push(`<text x="${W - pad - 20}" y="${y}" font-family="Arial, sans-serif" font-size="20" font-weight="800" fill="#16a34a" text-anchor="end">${esc(money(r.total))}</text>`);
-      y += rowH;
+      y += 32;
+      rows.forEach((row) => {
+        parts.push(`<text x="${pad + 28}" y="${y}" font-family="Arial, sans-serif" font-size="15" fill="#4b5563">${esc(row.label)}</text>`);
+        parts.push(`<text x="${W - pad - 20}" y="${y}" font-family="Arial, sans-serif" font-size="15" fill="#4b5563" text-anchor="end">${esc((row.amt < 0 ? "−" : "") + money(Math.abs(row.amt)))}</text>`);
+        y += 24;
+      });
+      y += 22;
     });
     y += 6;
     parts.push(`<line x1="${pad}" y1="${y - 26}" x2="${W - pad}" y2="${y - 26}" stroke="#bbf7d0" stroke-width="2"/>`);
