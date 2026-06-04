@@ -1,19 +1,26 @@
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#22c55e">
 <title>SplitGreen — Split the bill, fair & square</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
-<style> body { margin: 0; } #root { min-height: 100vh; } </style>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+  html, body { margin: 0; overflow-x: hidden; }
+  *, *::before, *::after { box-sizing: border-box; }
+  #root { min-height: 100vh; min-height: 100dvh; }
+  input, select, textarea, button { font-family: inherit; }
+  input, select, textarea { min-width: 0; }
+  img, canvas, video { max-width: 100%; }
+  * { -webkit-tap-highlight-color: transparent; }
+</style>
 <div id="root"></div>
 <script type="text/babel">
 const { useState, useRef, useEffect } = React;
 
 const CURRENCIES = ["Rp", "$", "€", "£", "¥", "₹", "฿"];
-const DEFAULT_MODEL = "claude-sonnet-4-6";
-const SCAN_PROMPT = 'Extract the receipt data from this image. Respond with ONLY raw JSON, no markdown, no backticks, no preamble. Use this schema exactly: {"items":[{"name":"string","price":number}],"tax":number,"service":number,"tip":number,"discount":number}. All values are positive numbers. service is the service charge / service fee. discount is the total discount amount. If a value is missing use 0. Only include real line items in items, not the subtotal/total/tax/service lines.';
 
 let idc = 1;
 const uid = () => `id${idc++}_${Math.random().toString(36).slice(2, 6)}`;
@@ -23,6 +30,119 @@ const b64enc = (str) => { try { return btoa(unescape(encodeURIComponent(str))); 
 const b64dec = (str) => { try { return decodeURIComponent(escape(atob(str))); } catch (e) { return ""; } };
 const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+
+// ---- Image helpers ----
+const prepImage = (image) => new Promise((resolve) => {
+  const img = new Image();
+  let objUrl = null;
+  img.onload = () => {
+    let w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+    if (!w || !h) { if (objUrl) URL.revokeObjectURL(objUrl); resolve(null); return; }
+    const MAX = 1600, scale = Math.min(1, MAX / Math.max(w, h));
+    w = Math.round(w * scale); h = Math.round(h * scale);
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    c.getContext("2d").drawImage(img, 0, 0, w, h);
+    if (objUrl) URL.revokeObjectURL(objUrl);
+    try { resolve({ b64: c.toDataURL("image/jpeg", 0.9).split(",")[1], mimeType: "image/jpeg" }); }
+    catch (e) { resolve(null); }
+  };
+  img.onerror = () => { if (objUrl) URL.revokeObjectURL(objUrl); resolve(null); };
+  if (typeof image === "string") img.src = image;
+  else { try { objUrl = URL.createObjectURL(image); img.src = objUrl; } catch (e) { resolve(null); } }
+});
+const toB64 = (image) => new Promise((resolve, reject) => {
+  if (typeof image === "string") {
+    const mt = (image.match(/^data:([^;]+)/) || [])[1] || "image/jpeg";
+    resolve({ b64: image.slice(image.indexOf(",") + 1), mimeType: mt });
+  } else {
+    const r = new FileReader();
+    r.onload = () => resolve({ b64: String(r.result).split(",")[1], mimeType: image.type || "image/jpeg" });
+    r.onerror = () => reject(new Error("read"));
+    r.readAsDataURL(image);
+  }
+});
+
+// ---- Tesseract pre-processing (fallback path) ----
+const preprocess = (image) => new Promise((resolve) => {
+  const img = new Image();
+  let objUrl = null;
+  img.onload = () => {
+    let w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+    if (!w || !h) { if (objUrl) URL.revokeObjectURL(objUrl); resolve(image); return; }
+    const maxSide = Math.max(w, h), MIN = 1500, MAX = 2400;
+    let scale = 1;
+    if (maxSide < MIN) scale = MIN / maxSide; else if (maxSide > MAX) scale = MAX / maxSide;
+    w = Math.round(w * scale); h = Math.round(h * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, w, h);
+    if (objUrl) URL.revokeObjectURL(objUrl);
+    let id;
+    try { id = ctx.getImageData(0, 0, w, h); } catch (e) { resolve(canvas.toDataURL("image/png")); return; }
+    const px = id.data, n = w * h;
+    const gray = new Uint8ClampedArray(n), hist = new Array(256).fill(0);
+    for (let i = 0, j = 0; i < px.length; i += 4, j++) {
+      const g = (px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114) | 0;
+      gray[j] = g; hist[g]++;
+    }
+    let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let sumB = 0, wB = 0, maxVar = 0, thr = 128;
+    for (let i = 0; i < 256; i++) {
+      wB += hist[i]; if (!wB) continue;
+      const wF = n - wB; if (!wF) break;
+      sumB += i * hist[i];
+      const mB = sumB / wB, mF = (sum - sumB) / wF;
+      const between = wB * wF * (mB - mF) * (mB - mF);
+      if (between > maxVar) { maxVar = between; thr = i; }
+    }
+    for (let i = 0, j = 0; i < px.length; i += 4, j++) {
+      const v = gray[j] > thr ? 255 : 0;
+      px[i] = px[i + 1] = px[i + 2] = v; px[i + 3] = 255;
+    }
+    ctx.putImageData(id, 0, 0);
+    resolve(canvas.toDataURL("image/png"));
+  };
+  img.onerror = () => { if (objUrl) URL.revokeObjectURL(objUrl); resolve(image); };
+  if (typeof image === "string") img.src = image;
+  else { try { objUrl = URL.createObjectURL(image); img.src = objUrl; } catch (e) { resolve(image); } }
+});
+const normalizeNum = (raw, currency) => {
+  let s = String(raw).replace(/[^\d.,]/g, "");
+  if (!s || !/\d/.test(s)) return null;
+  const noDecimals = currency === "Rp" || currency === "¥";
+  if (noDecimals) { const x = parseInt(s.replace(/[.,]/g, ""), 10); return isNaN(x) ? null : x; }
+  const seps = s.match(/[.,]/g) || [];
+  if (seps.length === 0) { const x = parseFloat(s); return isNaN(x) ? null : x; }
+  if (seps.length === 1) {
+    const idx = s.search(/[.,]/), after = s.length - idx - 1;
+    if (after === 3) { const x = parseFloat(s.replace(/[.,]/g, "")); return isNaN(x) ? null : x; }
+    const x = parseFloat(s.replace(",", ".")); return isNaN(x) ? null : x;
+  }
+  const cleaned = s.replace(/[.,](?=.*[.,])/g, "").replace(",", ".");
+  const x = parseFloat(cleaned); return isNaN(x) ? null : x;
+};
+const parseReceipt = (text, currency) => {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const out = { items: [], tax: "", service: "", tip: "", discount: "" };
+  const priceRe = /(\d[\d.,]*)\s*$/;
+  for (const line of lines) {
+    const m = line.match(priceRe);
+    if (!m) continue;
+    const value = normalizeNum(m[1], currency);
+    if (value == null || value === 0) continue;
+    let label = line.slice(0, m.index).trim();
+    label = label.replace(/\s*(rp|idr|usd|\$|€|£|¥)\s*$/i, "").replace(/[.\-:_=x ]+$/i, "").trim();
+    const low = line.toLowerCase();
+    if (/(sub ?total|grand ?total|^total|amount due|balance|cash|change|tunai|kembali|qris|visa|master|debit|credit|\bcard\b|npwp|invoice|no\.)/.test(low)) continue;
+    if (/(ppn|pb ?1|pajak|\btax\b|\bvat\b)/.test(low)) { out.tax = value; continue; }
+    if (/(service|svc|servis|layanan)/.test(low)) { out.service = value; continue; }
+    if (/(disc|diskon|potongan)/.test(low)) { out.discount = value; continue; }
+    if (/(\btip\b|gratuity)/.test(low)) { out.tip = value; continue; }
+    if (label && label.length >= 2 && /[a-zA-Z]/.test(label)) out.items.push({ name: label, price: value });
+  }
+  return out;
+};
 
 function App() {
   const [step, setStep] = useState("start");
@@ -45,13 +165,17 @@ function App() {
   const [history, setHistory] = useState(() => lsGet("sg_history", []));
   useEffect(() => { lsSet("sg_history", history); }, [history]);
 
-  const [apiKey, setApiKey] = useState(() => lsGet("sg_key", ""));
-  useEffect(() => { lsSet("sg_key", apiKey); }, [apiKey]);
-  const [model, setModel] = useState(() => lsGet("sg_model", DEFAULT_MODEL));
-  useEffect(() => { lsSet("sg_model", model); }, [model]);
-  const [showSettings, setShowSettings] = useState(false);
+  // Detect the server scan function (Gemini, hidden key)
+  const [serverScan, setServerScan] = useState(false);
+  useEffect(() => {
+    let live = true;
+    fetch("/api/scan").then((r) => (r.ok ? r.json() : null)).then((d) => { if (live && d && d.ok) setServerScan(true); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
 
   const [scanning, setScanning] = useState(false);
+  const [scanStatus, setScanStatus] = useState("");
+  const [scanProgress, setScanProgress] = useState(0);
   const [scanError, setScanError] = useState("");
   const [camOpen, setCamOpen] = useState(false);
   const [camError, setCamError] = useState("");
@@ -100,76 +224,65 @@ function App() {
     } catch (e) {}
   }, []);
 
-  // ---------- Receipt scanning (direct browser call with your own key) ----------
-  const scanReceipt = async (b64, mediaType) => {
-    if (!apiKey) { setScanError("Add your Anthropic API key in ⚙️ Settings to enable scanning."); setShowSettings(true); return; }
-    setScanError("");
-    setScanning(true);
+  // ---------- Scanning ----------
+  const applyScan = (parsed) => {
+    const scanned = (parsed.items || []).map((it) => ({ id: uid(), name: it.name || "Item", price: String(num(it.price)), assignedTo: [] }));
+    setItems(scanned.length ? scanned : [{ id: uid(), name: "", price: "", assignedTo: [] }]);
+    setTax(parsed.tax ? String(parsed.tax) : "");
+    setService(parsed.service ? String(parsed.service) : "");
+    setTip(parsed.tip ? String(parsed.tip) : "");
+    setDiscount(parsed.discount ? String(parsed.discount) : "");
+    setPeople([]); setPaid({}); setReadOnly(false); setLink(""); setImgUrl("");
+    try { window.history.replaceState(null, "", window.location.pathname); } catch (e) {}
+    setStep("review");
+  };
+  // Server (Gemini, hidden key). Returns parsed data, null if unavailable, or throws on server error.
+  const tryServerScan = async (image) => {
+    const prep = (await prepImage(image)) || (await toB64(image));
+    if (!prep) return null;
+    let resp;
+    try { resp = await fetch("/api/scan", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ image: prep.b64, mimeType: prep.mimeType }) }); }
+    catch (e) { return null; }
+    if (resp.status === 404) return null;
+    let data = null; try { data = await resp.json(); } catch (e) {}
+    if (resp.ok && data && !data.error) return data;
+    if (resp.status === 500 && data && data.error === "not_configured") return null;
+    const err = new Error("server"); err.code = resp.status === 429 ? "rate" : "api"; throw err;
+  };
+  const runOCR = async (image) => {
+    setScanError(""); setScanProgress(0); setScanStatus(serverScan ? "Reading with Gemini…" : "Enhancing photo…"); setScanning(true);
+    let worker;
     try {
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        body: JSON.stringify({
-          model: model || DEFAULT_MODEL,
-          max_tokens: 1500,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "image", source: { type: "base64", media_type: mediaType || "image/jpeg", data: b64 } },
-              { type: "text", text: SCAN_PROMPT },
-            ],
-          }],
-        }),
-      });
-      if (!resp.ok) {
-        if (resp.status === 401 || resp.status === 403) throw new Error("auth");
-        if (resp.status === 400 || resp.status === 404) throw new Error("model");
-        throw new Error("api");
+      let parsed = await tryServerScan(image);
+      if (!parsed) {
+        if (!window.Tesseract) { setScanError("The on-device reader is still loading — try again in a moment."); return; }
+        setScanStatus("Enhancing photo…");
+        const processed = await preprocess(image);
+        setScanStatus("Reading…");
+        worker = await window.Tesseract.createWorker("eng", 1, {
+          logger: (m) => { if (m.status === "recognizing text") setScanProgress(Math.round((m.progress || 0) * 100)); },
+        });
+        await worker.setParameters({ tessedit_pageseg_mode: "6", preserve_interword_spaces: "1", user_defined_dpi: "300" });
+        const { data } = await worker.recognize(processed);
+        parsed = parseReceipt(data.text || "", currency);
       }
-      const data = await resp.json();
-      const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-      const clean = text.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(clean);
-      const scanned = (parsed.items || []).map((it) => ({ id: uid(), name: it.name || "Item", price: String(num(it.price)), assignedTo: [] }));
-      setItems(scanned.length ? scanned : [{ id: uid(), name: "", price: "", assignedTo: [] }]);
-      setTax(parsed.tax ? String(parsed.tax) : "");
-      setService(parsed.service ? String(parsed.service) : "");
-      setTip(parsed.tip ? String(parsed.tip) : "");
-      setDiscount(parsed.discount ? String(parsed.discount) : "");
-      setPeople([]); setPaid({}); setReadOnly(false); setLink(""); setImgUrl("");
-      try { window.history.replaceState(null, "", window.location.pathname); } catch (e) {}
-      setStep("review");
+      applyScan(parsed);
     } catch (err) {
-      const msg = err && err.message;
-      if (msg === "auth") setScanError("Your API key was rejected. Double-check it in ⚙️ Settings.");
-      else if (msg === "model") setScanError(`The model "${model}" wasn't accepted. Try a different one in ⚙️ Settings.`);
-      else setScanError("Couldn't read that receipt. Try a sharper photo, check your connection, or enter items manually.");
+      const c = err && err.code;
+      if (c === "rate") setScanError("The scanner's free limit was hit — wait a minute and try again, or enter the items manually.");
+      else setScanError("Couldn't read that receipt. Try a clearer, flat, well-lit photo — or enter the items manually.");
     } finally {
-      setScanning(false);
+      if (worker) { try { await worker.terminate(); } catch (e) {} }
+      setScanning(false); setScanProgress(0); setScanStatus("");
     }
   };
   const onFile = async (e) => {
     const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    try {
-      const b64 = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(String(r.result).split(",")[1]);
-        r.onerror = () => rej(new Error("read"));
-        r.readAsDataURL(file);
-      });
-      await scanReceipt(b64, file.type || "image/jpeg");
-    } catch (err) { setScanError("Couldn't read that image. Try another photo."); }
     if (fileRef.current) fileRef.current.value = "";
+    if (file) await runOCR(file);
   };
   const openCamera = async () => {
     setCamError(""); setScanError("");
-    if (!apiKey) { setScanError("Add your Anthropic API key in ⚙️ Settings to enable scanning."); setShowSettings(true); return; }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { fileRef.current && fileRef.current.click(); return; }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
@@ -197,9 +310,9 @@ function App() {
     const canvas = document.createElement("canvas");
     canvas.width = v.videoWidth; canvas.height = v.videoHeight;
     canvas.getContext("2d").drawImage(v, 0, 0, canvas.width, canvas.height);
-    const b64 = canvas.toDataURL("image/jpeg", 0.92).split(",")[1];
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.95);
     closeCamera();
-    await scanReceipt(b64, "image/jpeg");
+    await runOCR(dataUrl);
   };
 
   // ---------- Items / People ----------
@@ -358,23 +471,22 @@ function App() {
   };
 
   const Header = ({ back }) => (
-    <div className="bg-gradient-to-br from-green-400 to-green-600 text-white px-5 pt-6 pb-7 rounded-b-3xl shadow-lg">
+    <div className="bg-gradient-to-br from-green-400 to-green-600 text-white px-4 pt-6 pb-7 rounded-b-3xl shadow-lg">
       <div className="flex items-center gap-1">
         {back && <button onClick={back} className="mr-1 -ml-1 px-2 py-1 rounded-full hover:bg-green-500 active:scale-95 text-xl leading-none">←</button>}
         <span className="text-2xl">🧾</span>
         <span className="text-xl font-extrabold tracking-tight">SplitGreen</span>
-        <button onClick={() => setShowSettings(true)} className="ml-auto text-lg p-2 rounded-full hover:bg-green-500 active:scale-95" aria-label="Settings">⚙️</button>
-        <button onClick={() => setDark((d) => !d)} className="text-lg p-2 rounded-full hover:bg-green-500 active:scale-95" aria-label="Toggle dark mode">{dark ? "☀️" : "🌙"}</button>
+        <button onClick={() => setDark((d) => !d)} className="ml-auto text-lg p-2 rounded-full hover:bg-green-500 active:scale-95" aria-label="Toggle dark mode">{dark ? "☀️" : "🌙"}</button>
       </div>
     </div>
   );
 
   const Field = ({ label, value, set, emoji }) => (
-    <div className={`flex items-center justify-between gap-3 ${t.card} rounded-2xl px-4 py-3 shadow-sm`}>
-      <span className={`text-sm font-semibold ${t.label}`}>{emoji} {label}</span>
-      <div className="flex items-center gap-1">
+    <div className={`flex items-center justify-between gap-2 ${t.card} rounded-2xl px-4 py-3 shadow-sm`}>
+      <span className={`text-sm font-semibold ${t.label} min-w-0 truncate`}>{emoji} {label}</span>
+      <div className="flex items-center gap-1 shrink-0">
         <span className={`${t.accent} font-bold`}>{currency}</span>
-        <input type="number" inputMode="decimal" value={value} onChange={(e) => set(e.target.value)} placeholder="0" className={`w-24 text-right font-bold ${t.inputText} ${t.soft} rounded-lg px-2 py-1 outline-none focus:ring-2 focus:ring-green-300`} />
+        <input type="number" inputMode="decimal" value={value} onChange={(e) => set(e.target.value)} placeholder="0" className={`w-20 text-right font-bold ${t.inputText} ${t.soft} rounded-lg px-2 py-1 outline-none focus:ring-2 focus:ring-green-300`} />
       </div>
     </div>
   );
@@ -383,27 +495,6 @@ function App() {
 
   return (
     <div className={`min-h-screen font-sans ${t.app}`}>
-
-      {showSettings && (
-        <div className="fixed inset-0 z-40 bg-black bg-opacity-50 flex items-end sm:items-center justify-center p-3" onClick={() => setShowSettings(false)}>
-          <div className={`${t.card} rounded-3xl shadow-xl p-5 max-w-md w-full`} onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-2">
-              <h2 className={`text-lg font-extrabold ${t.head}`}>⚙️ Receipt scanning</h2>
-              <button onClick={() => setShowSettings(false)} className={`${t.sub} text-xl px-2`}>✕</button>
-            </div>
-            <p className={`text-xs ${t.sub} mb-3`}>Paste your own Anthropic API key to turn on receipt scanning. Your key is stored only in this browser and is sent straight to Anthropic to read your receipts — it never goes to any other server.</p>
-            <label className={`text-sm font-semibold ${t.label}`}>Anthropic API key</label>
-            <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-ant-..." className={`w-full mt-1 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
-            <label className={`text-sm font-semibold ${t.label} block mt-3`}>Model</label>
-            <input value={model} onChange={(e) => setModel(e.target.value)} placeholder={DEFAULT_MODEL} className={`w-full mt-1 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
-            <div className="flex gap-2 mt-4">
-              <button onClick={() => setShowSettings(false)} className="flex-1 bg-green-500 hover:bg-green-600 text-white font-bold py-3 rounded-xl active:scale-95">Done</button>
-              <button onClick={() => { setApiKey(""); }} className={`${t.secBtn} font-bold py-3 px-4 rounded-xl border-2 active:scale-95`}>Clear key</button>
-            </div>
-            <p className={`text-xs ${t.sub} mt-3`}>Don't use this on a shared computer. Get a key at <a href="https://console.anthropic.com/settings/keys" target="_blank" className={`${t.accent} underline`}>console.anthropic.com</a>. Each scan uses a small amount of paid API credit on your account.</p>
-          </div>
-        </div>
-      )}
 
       {camOpen && (
         <div className="fixed inset-0 z-50 bg-black flex flex-col">
@@ -416,12 +507,12 @@ function App() {
         </div>
       )}
 
-      <div className="max-w-md mx-auto pb-24">
+      <div className="max-w-md mx-auto">
 
         {step === "start" && (
           <React.Fragment>
             <Header />
-            <div className="px-5 -mt-3">
+            <div className="px-4 -mt-3 pb-24">
               <div className={`${t.card} rounded-3xl shadow-md p-6 text-center`}>
                 <div className="text-4xl">🧾💸</div>
                 <h1 className={`text-2xl font-extrabold mt-3 ${t.head}`}>Split the bill, fair &amp; square</h1>
@@ -429,21 +520,13 @@ function App() {
               </div>
 
               <input ref={fileRef} type="file" accept="image/*" onChange={onFile} className="hidden" />
-              {apiKey ? (
-                <React.Fragment>
-                  <button onClick={openCamera} disabled={scanning} className="w-full mt-5 bg-green-500 hover:bg-green-600 text-white font-bold py-4 rounded-2xl shadow-md active:scale-[0.98] disabled:opacity-70">{scanning ? "Reading receipt…" : "📷 Scan with camera"}</button>
-                  <button onClick={() => fileRef.current && fileRef.current.click()} disabled={scanning} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98] disabled:opacity-70`}>🖼️ Upload a photo</button>
-                  <button onClick={startManual} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98]`}>✏️ Enter manually</button>
-                </React.Fragment>
-              ) : (
-                <React.Fragment>
-                  <button onClick={startManual} className="w-full mt-5 bg-green-500 hover:bg-green-600 text-white font-bold py-4 rounded-2xl shadow-md active:scale-[0.98]">✏️ Start a new split</button>
-                  <button onClick={() => setShowSettings(true)} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98]`}>📷 Turn on receipt scanning</button>
-                </React.Fragment>
-              )}
+              <button onClick={openCamera} disabled={scanning} className="w-full mt-5 bg-green-500 hover:bg-green-600 text-white font-bold py-4 rounded-2xl shadow-md active:scale-[0.98] disabled:opacity-70">{scanning ? `${scanStatus}${scanProgress ? " " + scanProgress + "%" : ""}` : "📷 Scan with camera"}</button>
+              <button onClick={() => fileRef.current && fileRef.current.click()} disabled={scanning} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98] disabled:opacity-70`}>🖼️ Upload a photo</button>
+              <button onClick={startManual} disabled={scanning} className={`w-full mt-3 ${t.secBtn} font-bold py-4 rounded-2xl shadow-sm border-2 active:scale-[0.98] disabled:opacity-70`}>✏️ Enter manually</button>
 
               {scanError && <p className={`${t.err} text-sm mt-3 rounded-xl p-3`}>{scanError}</p>}
               {camError && <p className={`${t.warn} text-sm mt-3 rounded-xl p-3`}>{camError}</p>}
+              <p className={`text-xs ${t.sub} text-center mt-3`}>{serverScan ? "✨ Scanning powered by Gemini — no setup needed." : "On-device scanning. Add a clear, flat, well-lit photo for best results."}</p>
 
               {history.length > 0 && (
                 <div className={`mt-6 ${t.card} rounded-2xl shadow-sm p-4`}>
@@ -451,11 +534,11 @@ function App() {
                   <div className="space-y-2">
                     {history.map((h) => (
                       <div key={h.id} className={`flex items-center gap-2 ${t.soft} rounded-xl p-3`}>
-                        <button onClick={() => loadFromDevice(h)} className="flex-1 text-left">
-                          <div className={`font-bold ${t.head}`}>{h.label}</div>
+                        <button onClick={() => loadFromDevice(h)} className="flex-1 min-w-0 text-left">
+                          <div className={`font-bold ${t.head} truncate`}>{h.label}</div>
                           <div className={`text-xs ${t.sub}`}>{h.count} {h.count === 1 ? "person" : "people"}</div>
                         </button>
-                        <button onClick={() => delFromDevice(h.id)} className="text-green-400 hover:text-red-500 px-2 active:scale-90">🗑️</button>
+                        <button onClick={() => delFromDevice(h.id)} className="text-green-400 hover:text-red-500 px-2 active:scale-90 shrink-0">🗑️</button>
                       </div>
                     ))}
                   </div>
@@ -470,7 +553,7 @@ function App() {
         {step === "review" && (
           <React.Fragment>
             <Header back={() => setStep("start")} />
-            <div className="px-5 -mt-3">
+            <div className="px-4 -mt-3 pb-24">
               <div className={`${t.card} rounded-3xl shadow-md p-5`}>
                 <div className="flex items-center justify-between mb-3">
                   <h2 className={`text-lg font-extrabold ${t.head}`}>🛒 Items</h2>
@@ -481,12 +564,12 @@ function App() {
                 <div className="space-y-2">
                   {items.map((it) => (
                     <div key={it.id} className="flex items-center gap-2">
-                      <input value={it.name} onChange={(e) => updItem(it.id, "name", e.target.value)} placeholder="Item name" className={`flex-1 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
-                      <div className={`flex items-center ${t.soft} rounded-xl px-2`}>
-                        <span className={`${t.accent} font-bold text-sm`}>{currency}</span>
-                        <input type="number" inputMode="decimal" value={it.price} onChange={(e) => updItem(it.id, "price", e.target.value)} placeholder="0" className={`w-20 text-right font-bold py-2 bg-transparent outline-none ${t.inputText}`} />
+                      <input value={it.name} onChange={(e) => updItem(it.id, "name", e.target.value)} placeholder="Item name" className={`flex-1 min-w-0 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
+                      <div className={`flex items-center ${t.soft} rounded-xl px-2 shrink-0`}>
+                        <span className={`${t.accent} font-bold text-xs`}>{currency}</span>
+                        <input type="number" inputMode="decimal" value={it.price} onChange={(e) => updItem(it.id, "price", e.target.value)} placeholder="0" className={`w-16 text-right font-bold py-2 bg-transparent outline-none ${t.inputText}`} />
                       </div>
-                      <button onClick={() => delItem(it.id)} className="text-green-400 hover:text-red-500 px-1 active:scale-90">🗑️</button>
+                      <button onClick={() => delItem(it.id)} className="text-green-400 hover:text-red-500 active:scale-90 shrink-0 text-lg">🗑️</button>
                     </div>
                   ))}
                 </div>
@@ -498,11 +581,11 @@ function App() {
                 <Field label="Service" value={service} set={setService} emoji="🛎️" />
                 <Field label="Discount" value={discount} set={setDiscount} emoji="🎉" />
                 <div className={`${t.card} rounded-2xl px-4 py-3 shadow-sm`}>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className={`text-sm font-semibold ${t.label}`}>💚 Tip</span>
-                    <div className="flex items-center gap-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className={`text-sm font-semibold ${t.label} min-w-0 truncate`}>💚 Tip</span>
+                    <div className="flex items-center gap-1 shrink-0">
                       <span className={`${t.accent} font-bold`}>{currency}</span>
-                      <input type="number" inputMode="decimal" value={tip} onChange={(e) => setTip(e.target.value)} placeholder="0" className={`w-24 text-right font-bold ${t.inputText} ${t.soft} rounded-lg px-2 py-1 outline-none focus:ring-2 focus:ring-green-300`} />
+                      <input type="number" inputMode="decimal" value={tip} onChange={(e) => setTip(e.target.value)} placeholder="0" className={`w-20 text-right font-bold ${t.inputText} ${t.soft} rounded-lg px-2 py-1 outline-none focus:ring-2 focus:ring-green-300`} />
                     </div>
                   </div>
                   <div className="flex gap-2 mt-2">
@@ -528,15 +611,15 @@ function App() {
         {step === "people" && (
           <React.Fragment>
             <Header back={() => setStep("review")} />
-            <div className="px-5 -mt-3">
+            <div className="px-4 -mt-3 pb-24">
               <div className={`${t.card} rounded-3xl shadow-md p-5`}>
                 <h2 className={`text-lg font-extrabold mb-3 ${t.head}`}>👥 Add people</h2>
                 <div className="flex gap-2">
-                  <input value={newPerson} onChange={(e) => setNewPerson(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addPerson()} placeholder="Name" className={`flex-1 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
-                  <button onClick={addPerson} className="bg-green-500 hover:bg-green-600 text-white font-bold px-4 rounded-xl active:scale-95 text-xl">+</button>
+                  <input value={newPerson} onChange={(e) => setNewPerson(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addPerson()} placeholder="Name" className={`flex-1 min-w-0 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
+                  <button onClick={addPerson} className="bg-green-500 hover:bg-green-600 text-white font-bold px-4 rounded-xl active:scale-95 text-xl shrink-0">+</button>
                 </div>
                 <div className="flex flex-wrap gap-2 mt-4">
-                  {people.map((p) => <span key={p.id} className={`flex items-center gap-1 ${t.chip} font-semibold rounded-full pl-3 pr-2 py-1`}>{p.name}<button onClick={() => delPerson(p.id)} className="hover:text-red-500 px-1">✕</button></span>)}
+                  {people.map((p) => <span key={p.id} className={`flex items-center gap-1 ${t.chip} font-semibold rounded-full pl-3 pr-2 py-1 max-w-full`}><span className="truncate">{p.name}</span><button onClick={() => delPerson(p.id)} className="hover:text-red-500 px-1 shrink-0">✕</button></span>)}
                   {!people.length && <p className={`${t.sub} text-sm`}>Add at least one person 🙂</p>}
                 </div>
               </div>
@@ -548,12 +631,12 @@ function App() {
         {step === "assign" && (
           <React.Fragment>
             <Header back={() => setStep("people")} />
-            <div className="px-5 -mt-3">
+            <div className="px-4 -mt-3 pb-24">
               <p className={`text-sm ${t.sub} mb-3 text-center`}>Tap names to assign each item. Tap several to split it. 🍽️</p>
               <div className="space-y-3">
                 {items.map((it) => (
                   <div key={it.id} className={`${t.card} rounded-2xl shadow-sm p-4`}>
-                    <div className={`flex justify-between font-bold ${t.head}`}><span>{it.name || "Item"}</span><span>{money(it.price)}</span></div>
+                    <div className={`flex justify-between gap-2 font-bold ${t.head}`}><span className="min-w-0 truncate">{it.name || "Item"}</span><span className="shrink-0">{money(it.price)}</span></div>
                     <div className="flex flex-wrap gap-2 mt-3">
                       {people.map((p) => { const on = it.assignedTo.includes(p.id); return <button key={p.id} onClick={() => toggleAssign(it.id, p.id)} className={`text-sm font-semibold rounded-full px-3 py-1 active:scale-95 border-2 ${on ? "bg-green-500 text-white border-green-500" : t.pillOff}`}>{on && "✓ "}{p.name}</button>; })}
                     </div>
@@ -570,7 +653,7 @@ function App() {
         {step === "results" && (
           <React.Fragment>
             <Header back={readOnly ? null : () => setStep("assign")} />
-            <div className="px-5 -mt-3">
+            <div className="px-4 -mt-3 pb-24">
               {readOnly && <div className={`${t.chip} text-sm font-semibold rounded-2xl p-3 mb-4 text-center`}>👀 Shared split (view only)</div>}
 
               <div className={`${t.card} rounded-3xl shadow-md p-5`}>
@@ -578,9 +661,9 @@ function App() {
                 <div className="space-y-3">
                   {results().map((r) => (
                     <div key={r.id} className={`${t.soft} rounded-2xl p-4`}>
-                      <div className="flex justify-between items-baseline">
-                        <span className={`font-extrabold text-lg ${t.head}`}>{r.name}</span>
-                        <span className={`font-extrabold text-lg ${t.accent}`}>{money(r.total)}</span>
+                      <div className="flex justify-between items-baseline gap-2">
+                        <span className={`font-extrabold text-lg ${t.head} min-w-0 truncate`}>{r.name}</span>
+                        <span className={`font-extrabold text-lg ${t.accent} shrink-0`}>{money(r.total)}</span>
                       </div>
                       <div className={`text-xs ${t.sub} mt-1 space-y-0.5`}>
                         <div className="flex justify-between"><span>Items</span><span>{money(r.itemTotal)}</span></div>
@@ -603,11 +686,11 @@ function App() {
                     <div className="space-y-2">
                       {people.map((p) => (
                         <div key={p.id} className="flex items-center gap-2">
-                          <span className={`flex-1 font-semibold text-sm ${t.head}`}>{p.name}</span>
-                          <button onClick={() => markPayer(p.id)} className={`text-xs font-bold ${t.chipBtn} rounded-lg px-2 py-1 active:scale-95`}>Paid it all</button>
-                          <div className={`flex items-center ${t.soft} rounded-xl px-2`}>
-                            <span className={`${t.accent} font-bold text-sm`}>{currency}</span>
-                            <input type="number" inputMode="decimal" value={paid[p.id] || ""} onChange={(e) => updPaid(p.id, e.target.value)} placeholder="0" className={`w-20 text-right font-bold py-2 bg-transparent outline-none ${t.inputText}`} />
+                          <span className={`flex-1 min-w-0 truncate font-semibold text-sm ${t.head}`}>{p.name}</span>
+                          <button onClick={() => markPayer(p.id)} className={`text-xs font-bold ${t.chipBtn} rounded-lg px-2 py-1 active:scale-95 shrink-0`}>Paid it all</button>
+                          <div className={`flex items-center ${t.soft} rounded-xl px-2 shrink-0`}>
+                            <span className={`${t.accent} font-bold text-xs`}>{currency}</span>
+                            <input type="number" inputMode="decimal" value={paid[p.id] || ""} onChange={(e) => updPaid(p.id, e.target.value)} placeholder="0" className={`w-16 text-right font-bold py-2 bg-transparent outline-none ${t.inputText}`} />
                           </div>
                         </div>
                       ))}
@@ -617,9 +700,9 @@ function App() {
                 )}
                 <div className="mt-3 space-y-2">
                   {tx.length ? tx.map((tr, i) => (
-                    <div key={i} className={`flex items-center justify-between ${t.soft} rounded-xl p-3`}>
-                      <span className={`text-sm ${t.head}`}><span className="font-bold">{tr.from}</span> pays <span className="font-bold">{tr.to}</span></span>
-                      <span className={`font-extrabold ${t.accent}`}>{money(tr.amt)}</span>
+                    <div key={i} className={`flex items-center justify-between gap-2 ${t.soft} rounded-xl p-3`}>
+                      <span className={`text-sm ${t.head} min-w-0`}><span className="font-bold">{tr.from}</span> pays <span className="font-bold">{tr.to}</span></span>
+                      <span className={`font-extrabold ${t.accent} shrink-0`}>{money(tr.amt)}</span>
                     </div>
                   )) : <p className={`${t.sub} text-sm`}>{readOnly ? "Nothing to settle 🎉" : "Add who paid above to see who owes whom."}</p>}
                 </div>
