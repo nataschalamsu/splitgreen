@@ -2,11 +2,12 @@
 // and serves index.html (and everything else) as static files.
 
 const GEMINI_PROMPT = `You are extracting the line items from a receipt photo, often an Indonesian restaurant or cafe receipt (thermal printed, sometimes slightly crumpled or angled). Return ONLY JSON, no markdown and no backticks, in exactly this shape:
-{"items":[{"name":string,"price":number}],"tax":number,"service":number,"tip":number,"discount":number}
+{"items":[{"name":string,"qty":number,"price":number}],"tax":number,"service":number,"tip":number,"discount":number}
 
 Rules:
+- "name" is the item name ONLY — do NOT include the quantity or any price in it.
+- "qty" is the quantity ordered for that row, as a plain integer. Use 1 when no quantity is printed.
 - Each item's "price" MUST be the LINE TOTAL for that row (quantity times unit price) — the rightmost amount printed on that item's line. Do NOT use the per-unit price shown after an "@" symbol.
-- If an item's quantity is greater than 1, include it in the name, for example "Soto Ayam (4x)".
 - Drop free modifier or note lines that cost 0 (for example "Less Sugar @0"). Do not list them as items.
 - All numbers must be plain values in the receipt's currency with NO currency symbols and NO thousands separators. Indonesian receipts use "." as a thousands separator, so "88.000" means 88000 and "9.000" means 9000.
 - tax: the tax line. It may be labelled PB1, PB 1, PPN, Pajak, Tax, or VAT.

@@ -132,6 +132,9 @@ const parseReceipt = (text, currency) => {
     const value = normalizeNum(m[1], currency);
     if (value == null || value === 0) continue;
     let label = line.slice(0, m.index).trim();
+    let qty = "";
+    const qm = label.match(/^(\d{1,3})\s*[xX×*]\s+/) || label.match(/\s[xX×]\s*(\d{1,3})$/);
+    if (qm) { const q = parseInt(qm[1], 10); if (q > 1) qty = String(q); label = label.replace(qm[0], " ").trim(); }
     label = label.replace(/\s*(rp|idr|usd|\$|€|£|¥)\s*$/i, "").replace(/[.\-:_=x ]+$/i, "").trim();
     const low = line.toLowerCase();
     if (/(sub ?total|grand ?total|^total|amount due|balance|cash|change|tunai|kembali|qris|visa|master|debit|credit|\bcard\b|npwp|invoice|no\.)/.test(low)) continue;
@@ -139,7 +142,7 @@ const parseReceipt = (text, currency) => {
     if (/(service|svc|servis|layanan)/.test(low)) { out.service = value; continue; }
     if (/(disc|diskon|potongan)/.test(low)) { out.discount = value; continue; }
     if (/(\btip\b|gratuity)/.test(low)) { out.tip = value; continue; }
-    if (label && label.length >= 2 && /[a-zA-Z]/.test(label)) out.items.push({ name: label, price: value });
+    if (label && label.length >= 2 && /[a-zA-Z]/.test(label)) out.items.push({ name: label, qty, price: value });
   }
   return out;
 };
@@ -227,8 +230,8 @@ function App() {
 
   // ---------- Scanning ----------
   const applyScan = (parsed) => {
-    const scanned = (parsed.items || []).map((it) => ({ id: uid(), name: it.name || "Item", price: String(num(it.price)), assignedTo: [] }));
-    setItems(scanned.length ? scanned : [{ id: uid(), name: "", price: "", assignedTo: [] }]);
+    const scanned = (parsed.items || []).map((it) => ({ id: uid(), name: it.name || "Item", qty: num(it.qty) > 1 ? String(num(it.qty)) : "", price: String(num(it.price)), assignedTo: [] }));
+    setItems(scanned.length ? scanned : [{ id: uid(), name: "", qty: "", price: "", assignedTo: [] }]);
     setTax(parsed.tax ? String(parsed.tax) : "");
     setService(parsed.service ? String(parsed.service) : "");
     setTip(parsed.tip ? String(parsed.tip) : "");
@@ -318,7 +321,7 @@ function App() {
   };
 
   // ---------- Items / People ----------
-  const addItem = () => setItems((s) => [...s, { id: uid(), name: "", price: "", assignedTo: [] }]);
+  const addItem = () => setItems((s) => [...s, { id: uid(), name: "", qty: "", price: "", assignedTo: [] }]);
   const updItem = (id, f, v) => setItems((s) => s.map((i) => (i.id === id ? { ...i, [f]: v } : i)));
   const delItem = (id) => setItems((s) => s.filter((i) => i.id !== id));
   const addPerson = () => { const name = newPerson.trim(); if (!name) return; setPeople((s) => [...s, { id: uid(), name }]); setNewPerson(""); };
@@ -350,7 +353,7 @@ function App() {
       const itemTotal = base[p.id];
       const lineItems = items
         .filter((it) => (it.assignedTo || []).includes(p.id))
-        .map((it) => { const ways = (it.assignedTo || []).length || 1; return { id: it.id, name: it.name || "Item", share: num(it.price) / ways, ways }; });
+        .map((it) => { const ways = (it.assignedTo || []).length || 1; return { id: it.id, name: (it.name || "Item") + (num(it.qty) > 1 ? ` ×${num(it.qty)}` : ""), share: num(it.price) / ways, ways }; });
       const frac = subtotal > 0 ? itemTotal / subtotal : 0;
       const taxShare = taxN * frac, svcShare = svcN * frac, tipShare = tipN * frac, discShare = discN * frac;
       return { ...p, itemTotal, lineItems, taxShare, svcShare, tipShare, discShare, total: itemTotal + taxShare + svcShare + tipShare - discShare };
@@ -458,7 +461,7 @@ function App() {
   };
 
   const startManual = () => {
-    setItems([{ id: uid(), name: "", price: "", assignedTo: [] }]);
+    setItems([{ id: uid(), name: "", qty: "", price: "", assignedTo: [] }]);
     setPeople([]); setTax(""); setService(""); setTip(""); setDiscount("");
     setCurrency("Rp"); setPaid({}); setReadOnly(false); setStep("review");
   };
@@ -584,15 +587,14 @@ function App() {
                 </div>
                 <div className="space-y-2">
                   {items.map((it) => (
-                    <div key={it.id} className={`border ${t.border} rounded-2xl p-3 space-y-2`}>
-                      <input value={it.name} onChange={(e) => updItem(it.id, "name", e.target.value)} placeholder="Item name" className={`w-full min-w-0 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
-                      <div className="flex items-center gap-2">
-                        <div className={`flex items-center ${t.soft} rounded-xl px-2`}>
-                          <span className={`${t.accent} font-bold text-xs`}>{currency}</span>
-                          <input type="number" inputMode="decimal" value={it.price} onChange={(e) => updItem(it.id, "price", e.target.value)} placeholder="0" className={`w-24 text-right font-bold py-2 bg-transparent outline-none ${t.inputText}`} />
-                        </div>
-                        <button onClick={() => delItem(it.id)} className="text-green-400 hover:text-red-500 active:scale-90 text-lg ml-auto">🗑️</button>
+                    <div key={it.id} className="flex items-center gap-2">
+                      <input value={it.name} onChange={(e) => updItem(it.id, "name", e.target.value)} placeholder="Item name" className={`flex-1 min-w-0 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`} />
+                      <input type="number" inputMode="numeric" value={it.qty || ""} onChange={(e) => updItem(it.id, "qty", e.target.value)} placeholder="1" title="Quantity" className={`w-11 text-center ${t.soft} ${t.inputText} rounded-xl px-1 py-2 outline-none focus:ring-2 focus:ring-green-300 shrink-0`} />
+                      <div className={`flex items-center ${t.soft} rounded-xl px-2 shrink-0`}>
+                        <span className={`${t.accent} font-bold text-xs`}>{currency}</span>
+                        <input type="number" inputMode="decimal" value={it.price} onChange={(e) => updItem(it.id, "price", e.target.value)} placeholder="0" className={`w-16 text-right font-bold py-2 bg-transparent outline-none ${t.inputText}`} />
                       </div>
+                      <button onClick={() => delItem(it.id)} className="text-green-400 hover:text-red-500 active:scale-90 shrink-0 text-lg">🗑️</button>
                     </div>
                   ))}
                 </div>
