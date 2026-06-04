@@ -55,40 +55,40 @@ async function handleScan(request, env) {
   }
 }
 
-// ---- Short share links (Cloudflare KV) ----
-const CODE_CHARS = "ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"; // no look-alikes (0/O/1/l)
-function makeCode(n = 7) {
-  const a = new Uint8Array(n);
-  crypto.getRandomValues(a);
-  let s = "";
-  for (let i = 0; i < n; i++) s += CODE_CHARS[a[i] % CODE_CHARS.length];
-  return s;
-}
-
+// ---- Short share links (shrtnr proxy; API key stays server-side) ----
 async function handleShare(request, env) {
-  if (!env.SPLITS) return json({ error: "not_configured" }, 500);
+  if (!env.SHRTNR_API_KEY) return json({ error: "not_configured" }, 500);
+  if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
-  if (request.method === "POST") {
-    let body;
-    try { body = await request.json(); } catch (e) { return json({ error: "bad_request" }, 400); }
-    const data = body && body.data;
-    if (typeof data !== "string" || !data) return json({ error: "no_data" }, 400);
-    if (data.length > 200000) return json({ error: "too_large" }, 413);
-    let code = makeCode();
-    for (let i = 0; i < 5 && (await env.SPLITS.get(code)) !== null; i++) code = makeCode();
-    await env.SPLITS.put(code, data);
-    return json({ id: code });
-  }
+  let body;
+  try { body = await request.json(); } catch (e) { return json({ error: "bad_request" }, 400); }
+  const target = body && body.url;
+  if (typeof target !== "string" || !target) return json({ error: "no_url" }, 400);
 
-  if (request.method === "GET") {
-    const id = new URL(request.url).searchParams.get("id") || "";
-    if (!/^[A-Za-z0-9]{1,32}$/.test(id)) return json({ error: "bad_id" }, 400);
-    const data = await env.SPLITS.get(id);
-    if (data === null) return json({ error: "not_found" }, 404);
-    return json({ data });
-  }
+  // Only shorten links that point back to this app (anti-abuse: not an open shortener).
+  let u;
+  try { u = new URL(target); } catch (e) { return json({ error: "bad_url" }, 400); }
+  if (u.origin !== new URL(request.url).origin) return json({ error: "bad_origin" }, 400);
+  if (target.length > 2048) return json({ error: "too_long" }, 413);
 
-  return json({ error: "method_not_allowed" }, 405);
+  const apiBase = (env.SHRTNR_API_BASE || "https://oddb.it/_/api").replace(/\/$/, "");
+  const shortBase = (env.SHRTNR_SHORT_BASE || "https://oddb.it").replace(/\/$/, "");
+
+  let r;
+  try {
+    r = await fetch(apiBase + "/links", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer " + env.SHRTNR_API_KEY },
+      body: JSON.stringify({ url: target }),
+    });
+  } catch (e) { return json({ error: "upstream_unreachable" }, 502); }
+
+  if (!r.ok) return json({ error: "shorten_failed" }, r.status);
+  let d; try { d = await r.json(); } catch (e) { return json({ error: "bad_upstream" }, 502); }
+  const slugs = (d && d.slugs) || [];
+  const primary = slugs.find((s) => s.is_primary && !s.disabled_at) || slugs.find((s) => !s.disabled_at) || slugs[0];
+  if (!primary || !primary.slug) return json({ error: "no_slug" }, 502);
+  return json({ url: shortBase + "/" + primary.slug });
 }
 
 export default {
