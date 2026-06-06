@@ -205,6 +205,18 @@ export function SplitProvider({ children }) {
         const { data } = await worker.recognize(processed);
         parsed = parseReceipt(data.text || "", currency);
       }
+      // Guard against non-receipt images: a real receipt has at least one priced
+      // item or a charge line. If we found neither, warn instead of dropping the
+      // user into an empty editor with no explanation.
+      const hasPriced = (parsed.items || []).some((it) => num(it.price) > 0);
+      const charges = num(parsed.tax) + num(parsed.service) + num(parsed.tip) + num(parsed.discount);
+      if (!hasPriced && charges === 0) {
+        setScanNotice("");
+        setScanError(
+          "Hmm, that doesn't look like a receipt — I couldn't find any items with prices. Try a clearer, flat, well-lit photo of the whole receipt, or enter the items manually."
+        );
+        return;
+      }
       applyScan(parsed);
     } catch (err) {
       const c = err && err.code;
@@ -237,21 +249,21 @@ export function SplitProvider({ children }) {
       return;
     }
     try {
+      // Ask for a high-resolution rear stream so receipt text stays sharp enough
+      // to read. The browser clamps to the nearest supported size.
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 2560 },
+          height: { ideal: 1440 },
+        },
         audio: false,
       });
       streamRef.current = stream;
-      // Detect torch/flash support — only some devices (mostly rear cameras on
-      // Android Chrome) expose it. Used to decide whether to show the flash button.
+      // Torch/focus capabilities are only reliable once the track is actually
+      // streaming, so they're detected in the play effect below — not here.
       setTorchOn(false);
-      try {
-        const track = stream.getVideoTracks()[0];
-        const caps = track && track.getCapabilities ? track.getCapabilities() : {};
-        setTorchSupported(!!caps.torch);
-      } catch (e) {
-        setTorchSupported(false);
-      }
+      setTorchSupported(false);
       setCamOpen(true);
     } catch (e) {
       setCamError("Couldn't open the live camera, opening your photo picker instead.");
@@ -274,10 +286,32 @@ export function SplitProvider({ children }) {
   };
 
   useEffect(() => {
-    if (camOpen && videoRef.current && streamRef.current) {
-      videoRef.current.srcObject = streamRef.current;
-      videoRef.current.play().catch(() => {});
-    }
+    if (!camOpen || !videoRef.current || !streamRef.current) return;
+    const video = videoRef.current;
+    const stream = streamRef.current;
+    video.srcObject = stream;
+    video.play().catch(() => {});
+
+    const track = stream.getVideoTracks()[0];
+    if (!track) return;
+    // Capabilities (torch, focus) often read empty until the track is live, so we
+    // detect once the video has reported its dimensions.
+    const detect = () => {
+      let caps = {};
+      try {
+        caps = track.getCapabilities ? track.getCapabilities() : {};
+      } catch (e) {}
+      setTorchSupported(!!caps.torch);
+      // Prefer continuous autofocus for sharper receipt captures, when supported.
+      if (caps.focusMode && caps.focusMode.includes && caps.focusMode.includes("continuous")) {
+        try {
+          track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+        } catch (e) {}
+      }
+    };
+    if (video.readyState >= 1) detect();
+    video.addEventListener("loadedmetadata", detect, { once: true });
+    return () => video.removeEventListener("loadedmetadata", detect);
   }, [camOpen]);
 
   useEffect(
