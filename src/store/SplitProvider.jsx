@@ -282,7 +282,14 @@ export function SplitProvider({ children }) {
     const next = !torchOn;
     try {
       await track.applyConstraints({ advanced: [{ torch: next }] });
-      setTorchOn(next);
+      // Reflect the real state when the device reports it (advanced constraints
+      // don't throw when unsupported, so this keeps the button honest).
+      let actual = next;
+      try {
+        const s = track.getSettings ? track.getSettings() : {};
+        if (typeof s.torch === "boolean") actual = s.torch;
+      } catch (e) {}
+      setTorchOn(actual);
     } catch (e) {
       setTorchSupported(false);
     }
@@ -297,24 +304,61 @@ export function SplitProvider({ children }) {
 
     const track = stream.getVideoTracks()[0];
     if (!track) return;
-    // Capabilities (torch, focus) often read empty until the track is live, so we
-    // detect once the video has reported its dimensions.
-    const detect = () => {
+
+    let cancelled = false;
+    let focusDone = false;
+    const timers = [];
+
+    // Torch support is reported inconsistently across Android devices and often
+    // populates only after the camera has been streaming for a moment, so we probe
+    // several ways and several times. We only ever ENABLE the button — an empty
+    // reading never hides it, since a later probe may still find torch.
+    const detect = async () => {
+      if (cancelled) return;
       let caps = {};
+      let settings = {};
       try {
         caps = track.getCapabilities ? track.getCapabilities() : {};
       } catch (e) {}
-      setTorchSupported(!!caps.torch);
-      // Prefer continuous autofocus for sharper receipt captures, when supported.
-      if (caps.focusMode && caps.focusMode.includes && caps.focusMode.includes("continuous")) {
+      try {
+        settings = track.getSettings ? track.getSettings() : {};
+      } catch (e) {}
+
+      let torch = !!caps.torch;
+      // Some Android/Chrome builds only expose flash via ImageCapture.
+      if (!torch && typeof ImageCapture !== "undefined") {
+        try {
+          const photo = await new ImageCapture(track).getPhotoCapabilities();
+          const modes = (photo && photo.fillLightMode) || [];
+          if (modes.includes("flash") || modes.includes("torch")) torch = true;
+        } catch (e) {}
+      }
+      // Last resort: a rear (environment) phone camera almost always has a torch
+      // even when neither API advertises it.
+      if (!torch && settings.facingMode === "environment") torch = true;
+
+      if (!cancelled && torch) setTorchSupported(true);
+
+      // Continuous autofocus for sharper receipt captures, when supported.
+      if (!focusDone && caps.focusMode && caps.focusMode.includes && caps.focusMode.includes("continuous")) {
+        focusDone = true;
         try {
           track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
         } catch (e) {}
       }
     };
+
     if (video.readyState >= 1) detect();
-    video.addEventListener("loadedmetadata", detect, { once: true });
-    return () => video.removeEventListener("loadedmetadata", detect);
+    video.addEventListener("loadedmetadata", detect);
+    video.addEventListener("playing", detect);
+    [300, 1000, 2000].forEach((ms) => timers.push(setTimeout(detect, ms)));
+
+    return () => {
+      cancelled = true;
+      timers.forEach(clearTimeout);
+      video.removeEventListener("loadedmetadata", detect);
+      video.removeEventListener("playing", detect);
+    };
   }, [camOpen]);
 
   useEffect(
