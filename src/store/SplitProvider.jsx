@@ -67,6 +67,7 @@ export function SplitProvider({ children }) {
   const [camError, setCamError] = useState("");
   const [torchOn, setTorchOn] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
+  const [torchError, setTorchError] = useState("");
 
   const [newPerson, setNewPerson] = useState("");
   const [readOnly, setReadOnly] = useState(false);
@@ -267,6 +268,7 @@ export function SplitProvider({ children }) {
       // streaming, so they're detected in the play effect below — not here.
       setTorchOn(false);
       setTorchSupported(false);
+      setTorchError("");
       setCamOpen(true);
     } catch (e) {
       setCamError("Couldn't open the live camera, opening your photo picker instead.");
@@ -280,18 +282,29 @@ export function SplitProvider({ children }) {
     const track = streamRef.current && streamRef.current.getVideoTracks()[0];
     if (!track || !track.applyConstraints) return;
     const next = !torchOn;
+    setTorchError("");
     try {
-      await track.applyConstraints({ advanced: [{ torch: next }] });
-      // Reflect the real state when the device reports it (advanced constraints
-      // don't throw when unsupported, so this keeps the button honest).
+      // Try the standard "advanced" form first, then the direct form some builds
+      // want. We don't hide the button on failure — instead we surface the error
+      // so a genuinely-unsupported device is distinguishable from a quirky one.
+      try {
+        await track.applyConstraints({ advanced: [{ torch: next }] });
+      } catch (e1) {
+        await track.applyConstraints({ torch: next });
+      }
+      // Reflect the real state when the device reports it.
       let actual = next;
       try {
         const s = track.getSettings ? track.getSettings() : {};
         if (typeof s.torch === "boolean") actual = s.torch;
       } catch (e) {}
       setTorchOn(actual);
+      if (next && actual !== true) {
+        setTorchError("Your browser accepted the flash request but the light didn't switch on.");
+      }
     } catch (e) {
-      setTorchSupported(false);
+      setTorchOn(false);
+      setTorchError("Flash unavailable on this camera (" + ((e && (e.name || e.message)) || "unknown error") + ").");
     }
   };
 
@@ -374,6 +387,7 @@ export function SplitProvider({ children }) {
       streamRef.current = null;
     }
     setTorchOn(false);
+    setTorchError("");
     setCamOpen(false);
   };
 
@@ -673,6 +687,7 @@ export function SplitProvider({ children }) {
     camError,
     torchOn,
     torchSupported,
+    torchError,
     newPerson,
     setNewPerson,
     readOnly,

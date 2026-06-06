@@ -1,7 +1,8 @@
 import { useSplit } from "../store/SplitProvider.jsx";
 
 export default function CameraModal() {
-  const { camOpen, videoRef, closeCamera, capturePhoto, torchOn, torchSupported, toggleTorch } = useSplit();
+  const { camOpen, videoRef, closeCamera, capturePhoto, torchOn, torchSupported, torchError, toggleTorch } =
+    useSplit();
   if (!camOpen) return null;
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
@@ -28,6 +29,11 @@ export default function CameraModal() {
         🧾 Fit the whole receipt in frame
       </div>
       <div className="absolute bottom-0 inset-x-0 pb-10 pt-8 flex flex-col items-center bg-gradient-to-t from-black to-transparent">
+        {torchError && (
+          <p className="mb-4 mx-4 max-w-xs text-center bg-black bg-opacity-60 text-amber-200 text-xs rounded-xl px-3 py-2">
+            {torchError}
+          </p>
+        )}
         <button
           onClick={capturePhoto}
           className="w-20 h-20 rounded-full bg-white border-4 border-green-400 active:scale-95 flex items-center justify-center shadow-lg text-3xl"
