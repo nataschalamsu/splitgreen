@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useRef, useEffect } from "react";
-import { uid, r2, num, b64enc, b64dec, lsGet, lsSet, formatMoney } from "../lib/format.js";
+import { uid, r2, num, encodeShare, decodeShare, lsGet, lsSet, formatMoney } from "../lib/format.js";
 import { prepImage, toB64, preprocess } from "../lib/image.js";
 import { parseReceipt } from "../lib/receipt.js";
 import { buildSvg } from "../lib/svg.js";
@@ -100,19 +100,22 @@ export function SplitProvider({ children }) {
   };
 
   useEffect(() => {
-    try {
-      const q = (window.location.search || "").match(/[?&]s=([^&]+)/);
-      const h = (window.location.hash || "").match(/[#&]s=([^&]+)/);
-      const enc = (q && q[1]) || (h && h[1]);
-      if (enc) {
-        const json = b64dec(decodeURIComponent(enc));
-        if (json) {
-          applyData(JSON.parse(json));
-          setReadOnly(true);
-          setStep("results");
-        }
+    const q = (window.location.search || "").match(/[?&]s=([^&]+)/);
+    const h = (window.location.hash || "").match(/[#&]s=([^&]+)/);
+    const enc = (q && q[1]) || (h && h[1]);
+    if (!enc) return;
+    let live = true;
+    (async () => {
+      const data = await decodeShare(decodeURIComponent(enc));
+      if (live && data) {
+        applyData(data);
+        setReadOnly(true);
+        setStep("results");
       }
-    } catch (e) {}
+    })();
+    return () => {
+      live = false;
+    };
   }, []);
 
   // ---------- Scanning ----------
@@ -450,13 +453,13 @@ export function SplitProvider({ children }) {
 
   // ---------- Share / Save / Image ----------
   const base = () => window.location.origin + window.location.pathname;
-  const selfLink = (payload) => base() + "?s=" + encodeURIComponent(b64enc(JSON.stringify(payload)));
+  const selfLink = async (payload) => base() + "?s=" + encodeURIComponent(await encodeShare(payload));
   const makeShare = async () => {
     if (sharing) return;
     setSharing(true);
     setCopied(false);
     const payload = { people, items, tax, service, tip, discount, currency, paid };
-    const longUrl = selfLink(payload);
+    const longUrl = await selfLink(payload);
     let url = "";
     try {
       const r = await fetch("/api/share", {
