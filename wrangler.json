@@ -2,6 +2,9 @@
   "name": "splitgreen",
   "main": "worker.js",
   "compatibility_date": "2025-09-01",
+  "build": {
+    "command": "npm run build"
+  },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS"
