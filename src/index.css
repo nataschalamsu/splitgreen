@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* App-level resets that Tailwind's preflight doesn't cover. */
+html,
+body {
+  margin: 0;
+  overflow-x: hidden;
+}
+
+#root {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+input,
+select,
+textarea,
+button {
+  font-family: inherit;
+}
+
+input,
+select,
+textarea {
+  min-width: 0;
+}
+
+img,
+canvas,
+video {
+  max-width: 100%;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}

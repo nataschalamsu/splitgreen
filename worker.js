@@ -1,5 +1,6 @@
-// worker.js — runs on Cloudflare. Handles /api/scan with Gemini (key hidden),
-// and serves index.html (and everything else) as static files.
+// worker.js — runs on Cloudflare. Handles /api/scan (Gemini, key hidden),
+// /api/share (shrtnr proxy) and /s/<slug> short-link redirects, and serves the
+// built dist/ (index.html and assets) as static files.
 
 const GEMINI_PROMPT = `You are extracting the line items from a receipt photo, often an Indonesian restaurant or cafe receipt (thermal printed, sometimes slightly crumpled or angled). Return ONLY JSON, no markdown and no backticks, in exactly this shape:
 {"items":[{"name":string,"qty":number,"price":number}],"tax":number,"service":number,"tip":number,"discount":number}
@@ -72,7 +73,10 @@ async function handleShare(request, env) {
   if (target.length > 2048) return json({ error: "too_long" }, 413);
 
   const apiBase = (env.SHRTNR_API_BASE || "https://oddb.it/_/api").replace(/\/$/, "");
-  const shortBase = (env.SHRTNR_SHORT_BASE || "https://oddb.it").replace(/\/$/, "");
+  // Short links live on THIS app's own domain (served by handleSlug below), so the
+  // default short base is the request origin. SHRTNR_SHORT_BASE can override it
+  // (e.g. a dedicated custom domain) if you ever want links somewhere else.
+  const shortBase = (env.SHRTNR_SHORT_BASE || u.origin).replace(/\/$/, "");
 
   let r;
   try {
@@ -88,7 +92,39 @@ async function handleShare(request, env) {
   const slugs = (d && d.slugs) || [];
   const primary = slugs.find((s) => s.is_primary && !s.disabled_at) || slugs.find((s) => !s.disabled_at) || slugs[0];
   if (!primary || !primary.slug) return json({ error: "no_slug" }, 502);
-  return json({ url: shortBase + "/" + primary.slug });
+  return json({ url: shortBase + "/s/" + primary.slug });
+}
+
+// ---- Resolve a short link on our own domain (/s/<slug>) ----
+// Looks the slug up via the shrtnr API and redirects to its target. We only ever
+// redirect back to this app's own origin (the same anti-abuse rule handleShare
+// enforces when creating links), so this can't be turned into an open redirect.
+async function handleSlug(request, env) {
+  const reqUrl = new URL(request.url);
+  const home = reqUrl.origin + "/";
+  const slug = decodeURIComponent(reqUrl.pathname.slice("/s/".length));
+  if (!slug || !/^[a-zA-Z0-9_-]+$/.test(slug)) return new Response("Not found", { status: 404 });
+  if (!env.SHRTNR_API_KEY) return Response.redirect(home, 302);
+
+  const apiBase = (env.SHRTNR_API_BASE || "https://oddb.it/_/api").replace(/\/$/, "");
+  let r;
+  try {
+    r = await fetch(apiBase + "/slugs/" + encodeURIComponent(slug), {
+      headers: { authorization: "Bearer " + env.SHRTNR_API_KEY },
+    });
+  } catch (e) { return Response.redirect(home, 302); }
+  if (!r.ok) return new Response("Link not found", { status: 404 });
+
+  let d; try { d = await r.json(); } catch (e) { return new Response("Link not found", { status: 404 }); }
+  const now = Math.floor(Date.now() / 1000);
+  if (d.expires_at && d.expires_at < now) return new Response("Link expired", { status: 410 });
+  const matched = (d.slugs || []).find((s) => s.slug === slug);
+  if (matched && matched.disabled_at) return new Response("Link disabled", { status: 410 });
+
+  let dest;
+  try { dest = new URL(d.url); } catch (e) { return new Response("Link not found", { status: 404 }); }
+  if (dest.origin !== reqUrl.origin) return new Response("Link not found", { status: 404 });
+  return Response.redirect(dest.toString(), 302);
 }
 
 export default {
@@ -100,6 +136,7 @@ export default {
       return json({ error: "method_not_allowed" }, 405);
     }
     if (url.pathname === "/api/share") return handleShare(request, env);
+    if (url.pathname.startsWith("/s/") && request.method === "GET") return handleSlug(request, env);
     return env.ASSETS.fetch(request);
   },
 };
