@@ -1,7 +1,7 @@
 import { useSplit } from "../store/SplitProvider.jsx";
 
 export default function CameraModal() {
-  const { camOpen, videoRef, closeCamera, capturePhoto, torchOn, torchSupported, torchError, toggleTorch } =
+  const { camOpen, videoRef, closeCamera, capturePhoto, torchOn, torchSupported, torchError, torchInfo, toggleTorch } =
     useSplit();
   if (!camOpen) return null;
   return (
@@ -30,8 +30,13 @@ export default function CameraModal() {
       </div>
       <div className="absolute bottom-0 inset-x-0 pb-10 pt-8 flex flex-col items-center bg-gradient-to-t from-black to-transparent">
         {torchError && (
-          <p className="mb-4 mx-4 max-w-xs text-center bg-black bg-opacity-60 text-amber-200 text-xs rounded-xl px-3 py-2">
+          <p className="mb-2 mx-4 max-w-xs text-center bg-black bg-opacity-60 text-amber-200 text-xs rounded-xl px-3 py-2">
             {torchError}
+          </p>
+        )}
+        {torchInfo && (
+          <p className="mb-4 mx-4 max-w-xs text-center bg-black bg-opacity-60 text-gray-300 text-[10px] font-mono rounded-lg px-3 py-1 break-all">
+            {torchInfo}
           </p>
         )}
         <button

@@ -68,6 +68,7 @@ export function SplitProvider({ children }) {
   const [torchOn, setTorchOn] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
   const [torchError, setTorchError] = useState("");
+  const [torchInfo, setTorchInfo] = useState(""); // one-time on-device capability readout
 
   const [newPerson, setNewPerson] = useState("");
   const [readOnly, setReadOnly] = useState(false);
@@ -269,6 +270,7 @@ export function SplitProvider({ children }) {
       setTorchOn(false);
       setTorchSupported(false);
       setTorchError("");
+      setTorchInfo("");
       setCamOpen(true);
     } catch (e) {
       setCamError("Couldn't open the live camera, opening your photo picker instead.");
@@ -337,20 +339,29 @@ export function SplitProvider({ children }) {
         settings = track.getSettings ? track.getSettings() : {};
       } catch (e) {}
 
-      let torch = !!caps.torch;
-      // Some Android/Chrome builds only expose flash via ImageCapture.
-      if (!torch && typeof ImageCapture !== "undefined") {
+      const capTorch = !!caps.torch;
+      // Some Android/Chrome builds only expose flash via ImageCapture (photo flash).
+      let fillModes = [];
+      const hasIC = typeof ImageCapture !== "undefined";
+      if (hasIC) {
         try {
           const photo = await new ImageCapture(track).getPhotoCapabilities();
-          const modes = (photo && photo.fillLightMode) || [];
-          if (modes.includes("flash") || modes.includes("torch")) torch = true;
+          fillModes = (photo && photo.fillLightMode) || [];
         } catch (e) {}
       }
+      const photoFlash = fillModes.includes("flash") || fillModes.includes("torch");
       // Last resort: a rear (environment) phone camera almost always has a torch
       // even when neither API advertises it.
-      if (!torch && settings.facingMode === "environment") torch = true;
+      const isRear = settings.facingMode === "environment";
 
-      if (!cancelled && torch) setTorchSupported(true);
+      if (!cancelled && (capTorch || photoFlash || isRear)) setTorchSupported(true);
+
+      // One-time on-device capability readout to diagnose flash support.
+      if (!cancelled) {
+        setTorchInfo(
+          `torch=${capTorch} facing=${settings.facingMode || "?"} IC=${hasIC} fill=[${fillModes.join(",") || "-"}]`
+        );
+      }
 
       // Continuous autofocus for sharper receipt captures, when supported.
       if (!focusDone && caps.focusMode && caps.focusMode.includes && caps.focusMode.includes("continuous")) {
@@ -688,6 +699,7 @@ export function SplitProvider({ children }) {
     torchOn,
     torchSupported,
     torchError,
+    torchInfo,
     newPerson,
     setNewPerson,
     readOnly,
