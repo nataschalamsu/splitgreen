@@ -68,7 +68,7 @@ export function SplitProvider({ children }) {
   const [torchOn, setTorchOn] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
   const [torchError, setTorchError] = useState("");
-  const [torchInfo, setTorchInfo] = useState(""); // one-time on-device capability readout
+  const [flashChecked, setFlashChecked] = useState(false); // true once we've probed flash support
 
   const [newPerson, setNewPerson] = useState("");
   const [readOnly, setReadOnly] = useState(false);
@@ -270,7 +270,7 @@ export function SplitProvider({ children }) {
       setTorchOn(false);
       setTorchSupported(false);
       setTorchError("");
-      setTorchInfo("");
+      setFlashChecked(false);
       setCamOpen(true);
     } catch (e) {
       setCamError("Couldn't open the live camera, opening your photo picker instead.");
@@ -324,44 +324,19 @@ export function SplitProvider({ children }) {
     let focusDone = false;
     const timers = [];
 
-    // Torch support is reported inconsistently across Android devices and often
-    // populates only after the camera has been streaming for a moment, so we probe
-    // several ways and several times. We only ever ENABLE the button — an empty
-    // reading never hides it, since a later probe may still find torch.
-    const detect = async () => {
+    // Torch support is reported inconsistently and can populate a moment after the
+    // camera starts, so we probe a few times. We only show the flash button when
+    // the device genuinely exposes a controllable torch — otherwise it's a dead
+    // button (many Android builds don't expose flash to the web at all).
+    const detect = () => {
       if (cancelled) return;
       let caps = {};
-      let settings = {};
       try {
         caps = track.getCapabilities ? track.getCapabilities() : {};
       } catch (e) {}
-      try {
-        settings = track.getSettings ? track.getSettings() : {};
-      } catch (e) {}
 
-      const capTorch = !!caps.torch;
-      // Some Android/Chrome builds only expose flash via ImageCapture (photo flash).
-      let fillModes = [];
-      const hasIC = typeof ImageCapture !== "undefined";
-      if (hasIC) {
-        try {
-          const photo = await new ImageCapture(track).getPhotoCapabilities();
-          fillModes = (photo && photo.fillLightMode) || [];
-        } catch (e) {}
-      }
-      const photoFlash = fillModes.includes("flash") || fillModes.includes("torch");
-      // Last resort: a rear (environment) phone camera almost always has a torch
-      // even when neither API advertises it.
-      const isRear = settings.facingMode === "environment";
-
-      if (!cancelled && (capTorch || photoFlash || isRear)) setTorchSupported(true);
-
-      // One-time on-device capability readout to diagnose flash support.
-      if (!cancelled) {
-        setTorchInfo(
-          `torch=${capTorch} facing=${settings.facingMode || "?"} IC=${hasIC} fill=[${fillModes.join(",") || "-"}]`
-        );
-      }
+      if (caps.torch) setTorchSupported(true);
+      setFlashChecked(true);
 
       // Continuous autofocus for sharper receipt captures, when supported.
       if (!focusDone && caps.focusMode && caps.focusMode.includes && caps.focusMode.includes("continuous")) {
@@ -399,6 +374,7 @@ export function SplitProvider({ children }) {
     }
     setTorchOn(false);
     setTorchError("");
+    setFlashChecked(false);
     setCamOpen(false);
   };
 
@@ -699,7 +675,7 @@ export function SplitProvider({ children }) {
     torchOn,
     torchSupported,
     torchError,
-    torchInfo,
+    flashChecked,
     newPerson,
     setNewPerson,
     readOnly,
