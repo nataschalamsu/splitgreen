@@ -1,6 +1,17 @@
 // Image helpers: downscale to base64 for the cloud scanner, raw base64 fallback,
 // and Otsu-thresholded preprocessing for the on-device Tesseract path.
 
+// Convert an Apple HEIC/HEIF image into a JPEG blob the browser can actually
+// decode. iPhones shoot HEIC by default and Chrome/Firefox can't render it, so
+// without this their uploads fail. heic2any (libheif/wasm) is lazy-loaded the
+// first time it's needed, keeping its weight out of the initial bundle.
+export const convertHeic = async (image) => {
+  if (typeof image === "string") return null; // camera captures are already JPEG data URLs
+  const { default: heic2any } = await import("heic2any");
+  const out = await heic2any({ blob: image, toType: "image/jpeg", quality: 0.92 });
+  return Array.isArray(out) ? out[0] : out;
+};
+
 export const prepImage = (image) =>
   new Promise((resolve) => {
     const img = new Image();

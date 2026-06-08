@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useRef, useEffect } from "react";
 import { uid, r2, num, encodeShare, decodeShare, lsGet, lsSet, formatMoney } from "../lib/format.js";
-import { prepImage, toB64, preprocess } from "../lib/image.js";
+import { prepImage, preprocess, convertHeic } from "../lib/image.js";
 import { parseReceipt } from "../lib/receipt.js";
 import { buildSvg } from "../lib/svg.js";
 
@@ -145,9 +145,9 @@ export function SplitProvider({ children }) {
     setStep("review");
   };
 
-  // Server (Gemini, hidden key). Returns parsed data, null if unavailable, or throws on server error.
-  const tryServerScan = async (image) => {
-    const prep = (await prepImage(image)) || (await toB64(image));
+  // Server (Gemini, hidden key). Takes an already-prepped {b64, mimeType} payload.
+  // Returns parsed data, null if unavailable, or throws on server error.
+  const tryServerScan = async (prep) => {
     if (!prep) return null;
     let resp;
     try {
@@ -179,7 +179,26 @@ export function SplitProvider({ children }) {
     setScanning(true);
     let worker;
     try {
-      let parsed = await tryServerScan(image);
+      // Re-encode to JPEG up front. A successful prep also proves the browser
+      // could decode the image. If it can't (e.g. an iPhone HEIC opened on a
+      // laptop, which Chrome/Firefox can't render), try converting HEIC→JPEG and
+      // prep again before giving up.
+      let prep = await prepImage(image);
+      if (!prep && typeof image !== "string") {
+        setScanStatus("Converting iPhone photo…");
+        try {
+          const converted = await convertHeic(image);
+          if (converted) prep = await prepImage(converted);
+        } catch (e) {}
+        setScanStatus(serverScan ? "Reading with Gemini…" : "Enhancing photo…");
+      }
+      if (!prep) {
+        setScanError(
+          "Couldn't read that image. Please upload a JPG or PNG, or use the in-app camera."
+        );
+        return;
+      }
+      let parsed = await tryServerScan(prep);
       if (!parsed) {
         if (serverScan)
           setScanNotice(
@@ -392,6 +411,11 @@ export function SplitProvider({ children }) {
 
   // ---------- Items / People ----------
   const addItem = () => setItems((s) => [...s, { id: uid(), name: "", qty: "", price: "", assignedTo: [] }]);
+  // Quick-add a named, priced line (the "add extra" form in Review) — for things
+  // the scan can't catch (a fee, a deposit, an item the receipt omits). It's a
+  // normal item, so it gets assigned to people like any other.
+  const addNamedItem = (name, price) =>
+    setItems((s) => [...s, { id: uid(), name: name || "Extra", qty: "", price: price || "", assignedTo: [] }]);
   const updItem = (id, f, v) => setItems((s) => s.map((i) => (i.id === id ? { ...i, [f]: v } : i)));
   const delItem = (id) => setItems((s) => s.filter((i) => i.id !== id));
   const addPerson = () => {
@@ -706,6 +730,7 @@ export function SplitProvider({ children }) {
     toggleTorch,
     startManual,
     addItem,
+    addNamedItem,
     updItem,
     delItem,
     addPerson,

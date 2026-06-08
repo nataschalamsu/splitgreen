@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useSplit } from "../../store/SplitProvider.jsx";
 import { CURRENCIES } from "../../constants.js";
 import Header from "../Header.jsx";
@@ -12,6 +13,7 @@ export default function ReviewStep() {
     updItem,
     delItem,
     addItem,
+    addNamedItem,
     tax,
     setTax,
     service,
@@ -27,6 +29,17 @@ export default function ReviewStep() {
     money,
     setStep,
   } = useSplit();
+
+  const [exName, setExName] = useState("");
+  const [exAmt, setExAmt] = useState("");
+  const addExtra = () => {
+    const name = exName.trim();
+    const amt = exAmt.trim();
+    if (!name && !amt) return;
+    addNamedItem(name, amt);
+    setExName("");
+    setExAmt("");
+  };
 
   return (
     <>
@@ -120,6 +133,42 @@ export default function ReviewStep() {
                 </button>
               ))}
             </div>
+          </div>
+        </div>
+
+        <div className={`mt-4 ${t.card} rounded-2xl px-4 py-3 shadow-sm`}>
+          <p className={`text-sm font-semibold ${t.label}`}>➕ Add extra</p>
+          <p className={`text-xs ${t.sub} mt-1 mb-2`}>
+            Anything the scan missed — a fee, a deposit, an item the receipt doesn't list. It's added as an item you can
+            assign to people.
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              value={exName}
+              onChange={(e) => setExName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addExtra()}
+              placeholder="Name"
+              className={`flex-1 min-w-0 ${t.soft} ${t.inputText} rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-green-300`}
+            />
+            <div className={`flex items-center ${t.soft} rounded-xl px-2 shrink-0`}>
+              <span className={`${t.accent} font-bold text-xs`}>{currency}</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                min="0"
+                value={exAmt}
+                onChange={(e) => setExAmt(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && addExtra()}
+                placeholder="0"
+                className={`w-16 text-right font-bold py-2 bg-transparent outline-none ${t.inputText}`}
+              />
+            </div>
+            <button
+              onClick={addExtra}
+              className="bg-green-500 hover:bg-green-600 text-white font-bold rounded-xl px-3 py-2 active:scale-95 shrink-0"
+            >
+              Add
+            </button>
           </div>
         </div>
 
